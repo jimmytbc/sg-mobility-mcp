@@ -1,4 +1,4 @@
-"""sg-mobility — Singapore public-transport MCP server.
+"""sg-mobility-mcp — Singapore public-transport MCP server.
 
 Entry point. Validates credentials up front, stands up the API clients
 and the two bus caches, wires the six tools into FastMCP, and hands
@@ -45,7 +45,7 @@ if _missing:
         f"See .env.example and README.md for setup."
     )
 
-mcp = FastMCP("sg-mobility")
+mcp = FastMCP("sg-mobility-mcp")
 lta = LTAClient(LTA_ACCOUNT_KEY)  # type: ignore[arg-type]
 onemap = OneMapClient(ONEMAP_EMAIL, ONEMAP_PASSWORD)  # type: ignore[arg-type]
 cache = MobilityCache()
@@ -58,5 +58,5 @@ register_routing_tools(mcp, lta, cache)
 
 
 if __name__ == "__main__":
-    print("sg-mobility: starting on stdio transport", file=sys.stderr)
+    print("sg-mobility-mcp: starting on stdio transport", file=sys.stderr)
     mcp.run(transport="stdio")

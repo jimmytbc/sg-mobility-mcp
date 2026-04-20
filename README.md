@@ -2,7 +2,7 @@
 
 **A grounded Singapore travel-planning brain for your AI personal assistant.**
 
-sg-mobility is a Model Context Protocol (MCP) server that turns any
+sg-mobility-mcp is a Model Context Protocol (MCP) server that turns any
 MCP-compatible agent — Claude Desktop, Claude Code, LangGraph pipelines,
 custom Claude Agent SDK assistants, Cursor, Cline, and more — into an
 assistant that can actually plan a day around Singapore using live
@@ -206,7 +206,7 @@ python server.py
 Expected output on stderr:
 
 ```
-sg-mobility: starting on stdio transport
+sg-mobility-mcp: starting on stdio transport
 ```
 
 The process then waits for MCP stdio input — this is normal. Press `Ctrl-C`
@@ -238,7 +238,7 @@ Replace `<path/to/sg-mobility-mcp>` with the absolute path to your clone.
 ```json
 {
   "mcpServers": {
-    "sg-mobility": {
+    "sg-mobility-mcp": {
       "command": "<path/to/sg-mobility-mcp>/.venv/bin/python",
       "args": ["<path/to/sg-mobility-mcp>/server.py"]
     }
@@ -248,7 +248,7 @@ Replace `<path/to/sg-mobility-mcp>` with the absolute path to your clone.
 
 > On **Windows**, use `\\` separators and `.venv\\Scripts\\python.exe`.
 
-If you have other MCP servers, merge the `sg-mobility` entry into your
+If you have other MCP servers, merge the `sg-mobility-mcp` entry into your
 existing `mcpServers` object — do not overwrite.
 
 ### 3. Point at the venv Python
@@ -262,7 +262,7 @@ certainly fail.
 If you're skipping `.env`, add an `env` block:
 
 ```json
-"sg-mobility": {
+"sg-mobility-mcp": {
   "command": "<path>/.venv/bin/python",
   "args": ["<path>/server.py"],
   "env": {
@@ -309,7 +309,7 @@ safe to commit as long as you leave the env values as placeholders):
 ```json
 {
   "mcpServers": {
-    "sg-mobility": {
+    "sg-mobility-mcp": {
       "type": "stdio",
       "command": "<path/to/sg-mobility-mcp>/.venv/bin/python",
       "args": ["<path/to/sg-mobility-mcp>/server.py"],
@@ -332,7 +332,7 @@ claude mcp add \
   --env LTA_ACCOUNT_KEY=your_key \
   --env ONEMAP_EMAIL=you@example.com \
   --env ONEMAP_PASSWORD=your_password \
-  sg-mobility \
+  sg-mobility-mcp \
   -- <path/to/sg-mobility-mcp>/.venv/bin/python <path/to/sg-mobility-mcp>/server.py
 ```
 
@@ -379,7 +379,7 @@ VENV_PY   = "/absolute/path/to/sg-mobility-mcp/.venv/bin/python"
 
 async def main():
     client = MultiServerMCPClient({
-        "sg_mobility": {
+        "sg_mobility_mcp": {
             "transport": "stdio",
             "command": VENV_PY,
             "args": [SERVER_PY],
@@ -409,7 +409,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Run it with your chosen LLM provider's key plus the three sg-mobility
+Run it with your chosen LLM provider's key plus the three sg-mobility-mcp
 env vars exported in the shell, or loaded from a `.env`.
 
 > If `get_tools()` behaves as if env vars aren't reaching the subprocess,
@@ -447,7 +447,7 @@ VENV_PY   = "/absolute/path/to/sg-mobility-mcp/.venv/bin/python"
 options = ClaudeAgentOptions(
     model="opus",  # alias — resolves to the latest Opus. Or pass a full ID.
     mcp_servers={
-        "sg_mobility": {
+        "sg_mobility_mcp": {
             "type": "stdio",
             "command": VENV_PY,
             "args": [SERVER_PY],
@@ -459,7 +459,7 @@ options = ClaudeAgentOptions(
         }
     },
     # Auto-approve every tool from this server (prefix = "mcp__<server_key>")
-    allowed_tools=["mcp__sg_mobility"],
+    allowed_tools=["mcp__sg_mobility_mcp"],
 )
 
 
@@ -692,10 +692,10 @@ them in memory for 24 hours. Subsequent calls are instant.
 
 ### Claude doesn't call my tools
 
-- Check `~/Library/Logs/Claude/mcp-server-sg-mobility.log` (macOS) for
+- Check `~/Library/Logs/Claude/mcp-server-sg-mobility-mcp.log` (macOS) for
   startup errors.
 - Verify Claude Desktop sees the server: in a new chat, ask
-  _"What tools do you have from sg-mobility?"_ — Claude should list the six.
+  _"What tools do you have from sg-mobility-mcp?"_ — Claude should list the six.
 - If Claude answers without calling any tool (e.g.
   _"I don't have real-time transport data"_), ask more directly:
   _"Please call the get_train_alerts tool."_
