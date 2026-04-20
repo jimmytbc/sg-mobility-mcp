@@ -83,7 +83,7 @@ assistant orchestrate it end to end on your behalf.
 | `resolve_location` | Geocode a place name / address / landmark → coordinates |
 | `search_bus_stops` | Find stops by name, road, or proximity to coordinates |
 | `get_bus_arrivals` | Live bus ETAs, load, type, accessibility, **destination terminal** |
-| `find_direct_bus` | Ranked **direct-bus** options between two coordinates (walk + ETA + ride + walk) |
+| `find_bus_route` | Ranked **direct or 1-transfer bus** journeys between two coordinates (walk + wait + ride + transfer + ride + walk) |
 | `get_train_alerts` | MRT/LRT service disruptions, optionally filtered by line |
 | `get_carpark_availability` | Real-time carpark lots across HDB, URA, LTA |
 
@@ -552,24 +552,33 @@ with ETA, GPS/scheduled indicator, load, bus type, wheelchair access, and
 
 ---
 
-### `find_direct_bus(from_latitude, from_longitude, to_latitude, to_longitude, max_walk_m=600, limit=3) -> str`
+### `find_bus_route(from_latitude, from_longitude, to_latitude, to_longitude, max_walk_m=600, max_transfer_walk_m=200, max_total_min=90, limit=3) -> str`
 
 **The recommended tool for trip planning.** Given origin and destination
-coordinates, this tool evaluates every candidate origin stop within
-`max_walk_m`, every candidate destination stop within `max_walk_m`, and
-matches services that serve both with the correct direction (stop sequence
-monotonic). For each match it fetches live ETA at the origin, estimates
-in-vehicle time, and ranks the top `limit` options by **total walk + wait
-+ ride + walk**.
+coordinates, this tool finds the best bus journeys — direct or with one
+transfer — scored server-side by total time. It evaluates every candidate
+origin and destination stop within `max_walk_m`, looks for services that
+serve both directly (with the correct direction) AND pairs of services
+that share an interchange stop reachable within `max_transfer_walk_m`
+for a 1-transfer journey. For each candidate it fetches live ETA at the
+origin, estimates in-vehicle and transfer times, and ranks the top
+`limit` options by **total walk + wait + ride + (transfer walk + wait
++ ride) + walk**.
 
-**Example prompt:** _"What's the best bus from Bedok Mall to Tampines Mall?"_
+**Example prompt:** _"What's the best bus from Bedok Mall to Gleneagles Hospital?"_
 
-**Returns** ranked options with: origin stop code + walk distance, live ETA,
-ride stop count, alight stop code + walk distance, terminus for each
-service, and estimated total journey time.
+**Returns** ranked direct and 1-transfer options with: origin stop code
++ walk distance, live ETA, ride stop count, alight stop (and, for
+transfers, board stop + transfer walk), terminus for each leg, and
+estimated total journey time.
 
-If no direct bus exists within the walk radius, the tool says so — fall
+If no direct or 1-transfer bus exists within the walk radii, or every
+option exceeds `max_total_min` (default 90), the tool says so — fall
 back to MRT or multi-leg planning.
+
+**Honest limits**: transfer wait time is a fixed 10-minute assumption
+(we don't have scheduled intervals). In-vehicle time is a flat ~1.8
+min/stop estimate. Totals are flagged as estimates in the output.
 
 ---
 
@@ -615,7 +624,7 @@ Claude calls `resolve_location` → `search_bus_stops` (geo) →
 
 > What's the fastest bus from Compass One to Tampines Mall?
 
-Claude calls `resolve_location` twice then `find_direct_bus`. The tool does
+Claude calls `resolve_location` twice then `find_bus_route`. The tool does
 the multi-stop comparison server-side and ranks by total time — you get
 the best option directly, not just the nearest stop's first bus.
 
@@ -640,12 +649,13 @@ appointments and let it plan the whole day:
 Behind the scenes your agent will:
 
 1. `resolve_location` each venue (5–6 calls) to get coordinates.
-2. `find_direct_bus` for each leg — the server does the walk + wait +
+2. `find_bus_route` for each leg — the server does the walk + wait +
    ride scoring so the agent gets a ranked answer, not a bus number to
    guess between.
-3. Fall back to MRT when `find_direct_bus` reports no direct route —
-   your agent fills in transfers from general knowledge, but it does
-   so knowing the direct bus genuinely doesn't exist.
+3. Fall back to MRT when `find_bus_route` returns nothing (or every
+   option exceeds the 90-min cap) — your agent fills in train legs
+   from general knowledge, knowing the bus options were genuinely
+   checked.
 4. Optionally `get_train_alerts` to check for disruptions before
    committing to an MRT-heavy itinerary.
 5. Assemble a timed plan with leave-by times and buffers.
@@ -684,10 +694,10 @@ into <https://www.onemap.gov.sg/apidocs/> in a browser to verify.
 Your LTA AccountKey is invalid or still pending approval. Check your email
 for the approval message — LTA issues keys within 1–2 business days.
 
-### The first `find_direct_bus` or `search_bus_stops` call is slow
+### The first `find_bus_route` or `search_bus_stops` call is slow
 
 Expected. The server lazy-loads ~5,200 bus stops (and ~26,700 bus route
-rows on first `find_direct_bus` call) from LTA on first use, then caches
+rows on first `find_bus_route` call) from LTA on first use, then caches
 them in memory for 24 hours. Subsequent calls are instant.
 
 ### Claude doesn't call my tools
@@ -725,7 +735,7 @@ Small, flat, explicit — no framework, no database, no background workers.
     first `get_bus_arrivals` call. Used for code → name resolution and
     proximity search. 24h TTL.
   - `routes_by_service` / `routes_by_stop` — warmed lazily on first
-    `find_direct_bus` call. Indexed two ways so both "what services pass
+    `find_bus_route` call. Indexed two ways so both "what services pass
     this stop?" and "what's the stop sequence on this route?" are O(1).
     24h TTL.
 - **Fail-fast**: `server.py` validates all three env vars at import time.
@@ -741,18 +751,20 @@ Small, flat, explicit — no framework, no database, no background workers.
 
 Be honest with users about what this server does not do:
 
-1. **`find_direct_bus` is direct-only.** One service, no transfers. If no
-   single bus exists for the trip, the tool says so. Multi-leg bus
-   journeys are not supported.
+1. **`find_bus_route` supports direct and 1-transfer journeys.** Two or
+   more bus transfers are not planned; if the best route needs multiple
+   hops, the tool says so and you fall back to MRT.
 2. **No MRT routing.** The server does not plan MRT rides or transfers.
    `get_train_alerts` only reports disruptions. When a trip needs MRT,
    Claude fills in the route from general knowledge — which may be stale
    (e.g. recent line openings).
-3. **In-vehicle time is an estimate.** `find_direct_bus` uses a flat
-   ~1.8 minutes per stop and ~80 m/min walking speed. Real bus rides vary
-   with traffic, express-vs-local service patterns, and time of day.
+3. **In-vehicle time, walking speed, and transfer wait are estimates.**
+   `find_bus_route` uses a flat ~1.8 minutes per stop, 80 m/min walking,
+   and a fixed 10-minute wait at any transfer point (we don't have
+   scheduled intervals). Real bus rides vary with traffic,
+   express-vs-local service patterns, and time of day.
 4. **No walking-only planner.** If the two points are close enough that
-   walking is fastest, `find_direct_bus` will short-circuit with a
+   walking is fastest, `find_bus_route` will short-circuit with a
    suggestion to walk — but it won't compute walking directions.
 5. **Carpark data comes from LTA's feed** — not every carpark in Singapore
    is included (e.g. some private ones).
@@ -793,7 +805,7 @@ sg-mobility-mcp/
 │   ├── train.py           ← get_train_alerts
 │   ├── carpark.py         ← get_carpark_availability
 │   ├── location.py        ← resolve_location
-│   └── routing.py         ← find_direct_bus
+│   └── routing.py         ← find_bus_route
 ├── cache.py               ← lazy-warmed bus stops + bus routes (24h TTL each)
 ├── requirements.txt
 ├── .env.example           ← template with placeholders (safe to commit)
