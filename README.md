@@ -155,8 +155,8 @@ You need all five:
 ## Installation
 
 ```bash
-git clone <this-repo-url> sg-mobility
-cd sg-mobility
+git clone https://github.com/jimmytbc/sg-mobility-mcp.git
+cd sg-mobility-mcp
 
 # Create and activate a virtual environment
 python3 -m venv .venv
@@ -233,14 +233,14 @@ If the file doesn't exist, create it with `{"mcpServers": {}}`.
 
 ### 2. Add this entry under `mcpServers`
 
-Replace `<path/to/sg-mobility>` with the absolute path to your clone.
+Replace `<path/to/sg-mobility-mcp>` with the absolute path to your clone.
 
 ```json
 {
   "mcpServers": {
     "sg-mobility": {
-      "command": "<path/to/sg-mobility>/.venv/bin/python",
-      "args": ["<path/to/sg-mobility>/server.py"]
+      "command": "<path/to/sg-mobility-mcp>/.venv/bin/python",
+      "args": ["<path/to/sg-mobility-mcp>/server.py"]
     }
   }
 }
@@ -311,8 +311,8 @@ safe to commit as long as you leave the env values as placeholders):
   "mcpServers": {
     "sg-mobility": {
       "type": "stdio",
-      "command": "<path/to/sg-mobility>/.venv/bin/python",
-      "args": ["<path/to/sg-mobility>/server.py"],
+      "command": "<path/to/sg-mobility-mcp>/.venv/bin/python",
+      "args": ["<path/to/sg-mobility-mcp>/server.py"],
       "env": {
         "LTA_ACCOUNT_KEY": "your_key",
         "ONEMAP_EMAIL": "you@example.com",
@@ -333,7 +333,7 @@ claude mcp add \
   --env ONEMAP_EMAIL=you@example.com \
   --env ONEMAP_PASSWORD=your_password \
   sg-mobility \
-  -- <path/to/sg-mobility>/.venv/bin/python <path/to/sg-mobility>/server.py
+  -- <path/to/sg-mobility-mcp>/.venv/bin/python <path/to/sg-mobility-mcp>/server.py
 ```
 
 Scope options:
@@ -373,8 +373,8 @@ from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 
-SERVER_PY = "/absolute/path/to/sg-mobility/server.py"
-VENV_PY   = "/absolute/path/to/sg-mobility/.venv/bin/python"
+SERVER_PY = "/absolute/path/to/sg-mobility-mcp/server.py"
+VENV_PY   = "/absolute/path/to/sg-mobility-mcp/.venv/bin/python"
 
 
 async def main():
@@ -441,8 +441,8 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-SERVER_PY = "/absolute/path/to/sg-mobility/server.py"
-VENV_PY   = "/absolute/path/to/sg-mobility/.venv/bin/python"
+SERVER_PY = "/absolute/path/to/sg-mobility-mcp/server.py"
+VENV_PY   = "/absolute/path/to/sg-mobility-mcp/.venv/bin/python"
 
 options = ClaudeAgentOptions(
     model="opus",  # alias — resolves to the latest Opus. Or pass a full ID.
@@ -781,7 +781,7 @@ Be honest with users about what this server does not do:
 ## Project layout
 
 ```
-sg-mobility/
+sg-mobility-mcp/
 ├── server.py              ← entry point + tool registration + env fail-fast
 ├── api/
 │   ├── __init__.py
