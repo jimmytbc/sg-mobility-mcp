@@ -1,4 +1,4 @@
-# sg-mobility
+# sg-mobility-mcp
 
 **A grounded Singapore travel-planning brain for your AI personal assistant.**
 
