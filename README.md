@@ -825,4 +825,4 @@ sg-mobility-mcp/
 
 ## License
 
-TBD.
+[MIT](LICENSE) © 2026 Jimmy Tong.
