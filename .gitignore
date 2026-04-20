@@ -1,0 +1,47 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials.json
+
+# Python caches
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Coverage / logs
+.coverage
+htmlcov/
+*.log
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local process / workspace notes — never commit
+CLAUDE.md
+tasks/
+
+# Jupyter
+.ipynb_checkpoints/
