@@ -1,0 +1,12 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jimmytbc/sg-mobility-mcp",
+  "title": "SG Mobility",
+  "description": "MCP server for Singapore public transport — live bus arrivals, direct-bus trip planning, MRT/LRT alerts, and carpark availability. Uses LTA DataMall and OneMap. For Claude Desktop, Claude Code, LangGraph, and other MCP agents.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/jimmytbc/sg-mobility-mcp#readme",
+  "repository": {
+    "url": "https://github.com/jimmytbc/sg-mobility-mcp",
+    "source": "github"
+  }
+}
