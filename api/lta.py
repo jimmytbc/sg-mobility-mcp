@@ -5,13 +5,32 @@ construction so every request is pre-authenticated. Pagination is
 transparent: LTA pages most collections at 500 rows, so we fetch in a
 loop with $skip until a short page comes back.
 
+429 responses are retried with 2s / 5s / 15s delays (per RISK-1
+fallback in specs/11-risks.md). Upstream failures raise typed
+exceptions from `api.errors` so the tool layer can map each to the
+right `ERR_*` string without stringly-typed inspection.
+
 Author: Jimmy Tong
 """
 
+from __future__ import annotations
+
+import asyncio
+import sys
+
 import httpx
+
+from api.errors import (
+    LTAAuthFailed,
+    LTAEndpointNotFound,
+    LTARateLimited,
+    LTATimeout,
+    UpstreamError,
+)
 
 BASE_URL = "https://datamall2.mytransport.sg/ltaodataservice"
 PAGE_SIZE = 500
+RATE_LIMIT_BACKOFFS_S: tuple[float, ...] = (2.0, 5.0, 15.0)
 
 
 class LTAClient:
@@ -26,12 +45,36 @@ class LTAClient:
         await self._client.aclose()
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
-        res = await self._client.get(path, params=params or {})
-        if res.status_code != 200:
-            raise RuntimeError(
+        attempt = 0
+        while True:
+            try:
+                res = await self._client.get(path, params=params or {})
+            except httpx.TimeoutException as exc:
+                raise LTATimeout(f"LTA {path} timed out") from exc
+            except httpx.RequestError as exc:
+                raise LTATimeout(f"LTA {path} request failed: {exc}") from exc
+
+            if res.status_code == 200:
+                return res.json()
+            if res.status_code == 429:
+                if attempt < len(RATE_LIMIT_BACKOFFS_S):
+                    delay = RATE_LIMIT_BACKOFFS_S[attempt]
+                    print(
+                        f"[lta] 429 on {path}; backing off {delay}s "
+                        f"(attempt {attempt + 1}/{len(RATE_LIMIT_BACKOFFS_S)})",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                raise LTARateLimited(f"LTA {path} rate-limited after retries")
+            if res.status_code in (401, 403):
+                raise LTAAuthFailed(f"LTA {path} auth failed ({res.status_code})")
+            if res.status_code == 404:
+                raise LTAEndpointNotFound(path)
+            raise UpstreamError(
                 f"LTA {path} returned {res.status_code}: {res.text[:200]}"
             )
-        return res.json()
 
     async def _get_paginated(self, path: str) -> list[dict]:
         results: list[dict] = []

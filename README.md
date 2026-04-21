@@ -775,6 +775,9 @@ Be honest with users about what this server does not do:
 
 ## Security
 
+- This server is designed for single-tenant local use. Do not host this
+  server on a shared multi-tenant endpoint without first adding
+  authentication, quota, and audit — none of which v0.2 provides.
 - `.env` is in `.gitignore`. So are `.env.*` (except `.env.example`),
   `*.pem`, `*.key`, `*.p12`, and `.DS_Store`. **Do not remove these
   rules.**

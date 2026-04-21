@@ -8,9 +8,32 @@ query.
 Author: Jimmy Tong
 """
 
+from __future__ import annotations
+
 import math
 
+from api.errors import (
+    LTAAuthFailed,
+    LTAEndpointNotFound,
+    LTARateLimited,
+    LTATimeout,
+    UpstreamError,
+)
 from api.lta import LTAClient
+from tools._format import (
+    ERR_LTA_AUTH_FAILED,
+    ERR_LTA_ENDPOINT_NOT_FOUND,
+    ERR_LTA_RATE_LIMITED,
+    ERR_LTA_TIMEOUT,
+    MSG_CARPARK_FEED,
+    MSG_ERR_LTA_AUTH_FAILED,
+    MSG_ERR_LTA_RATE_LIMITED,
+    MSG_ERR_LTA_TIMEOUT,
+    error,
+    footer,
+    header,
+    msg_err_lta_endpoint_not_found,
+)
 
 LOT_LABELS = {"C": "car", "Y": "motorcycle", "H": "heavy vehicle"}
 DISPLAY_CAP = 20
@@ -51,6 +74,19 @@ def _fmt_row(r: dict, distance: int | None = None) -> str:
     return line
 
 
+def _lta_error(exc: UpstreamError) -> str:
+    if isinstance(exc, LTAAuthFailed):
+        return error(ERR_LTA_AUTH_FAILED, MSG_ERR_LTA_AUTH_FAILED)
+    if isinstance(exc, LTARateLimited):
+        return error(ERR_LTA_RATE_LIMITED, MSG_ERR_LTA_RATE_LIMITED)
+    if isinstance(exc, LTAEndpointNotFound):
+        return error(
+            ERR_LTA_ENDPOINT_NOT_FOUND,
+            msg_err_lta_endpoint_not_found(exc.path),
+        )
+    return error(ERR_LTA_TIMEOUT, MSG_ERR_LTA_TIMEOUT)
+
+
 def register_carpark_tools(mcp, lta: LTAClient) -> None:
     @mcp.tool()
     async def get_carpark_availability(
@@ -61,19 +97,17 @@ def register_carpark_tools(mcp, lta: LTAClient) -> None:
         lot_type: str = "C",
         min_lots: int = 0,
     ) -> str:
-        """Get real-time carpark lot availability across HDB, URA, and LTA
-        carparks in Singapore.
+        """Real-time carpark lot availability (HDB, URA, LTA) in Singapore.
 
-        Provide area for text search OR latitude+longitude for nearby
-        carparks. Geo search takes precedence if both are provided.
-        lot_type: C=car (default), Y=motorcycle, H=heavy vehicle.
-        Results are sorted by distance in geo mode, or by available lots
-        descending in text mode.
+        Provide `area` for text search OR `latitude`+`longitude` for nearby
+        carparks; geo search takes precedence. lot_type: C=car (default),
+        Y=motorcycle, H=heavy vehicle. Geo mode sorts by distance; text
+        mode sorts by available lots descending.
         """
         try:
             rows = await lta.get_carpark_availability()
-        except RuntimeError as e:
-            return f"Could not fetch carpark availability: {e}"
+        except UpstreamError as exc:
+            return _lta_error(exc)
 
         rows = [
             r
@@ -94,18 +128,25 @@ def register_carpark_tools(mcp, lta: LTAClient) -> None:
                     hits.append((d, r))
             hits.sort(key=lambda x: x[0])
             hits = hits[:DISPLAY_CAP]
+            summary_tail = f"(lot type {lot_type}"
+            if min_lots > 0:
+                summary_tail += f", min {min_lots} lots"
+            summary_tail += ")"
             if not hits:
-                return (
-                    f"No carparks within {radius_m}m of "
-                    f"({latitude:.4f}, {longitude:.4f}) with lot_type={lot_type}."
+                summary = (
+                    f"0 carparks within {radius_m}m of "
+                    f"{latitude:.5f}, {longitude:.5f} {summary_tail}"
                 )
-            out = [
-                f"Carparks within {radius_m}m of "
-                f"({latitude:.4f}, {longitude:.4f}) — {label} lots:",
-                "",
-            ]
+                return header("get_carpark_availability", summary)
+            summary = (
+                f"{len(hits)} carparks within {radius_m}m of "
+                f"{latitude:.5f}, {longitude:.5f} {summary_tail}"
+            )
+            out = [header("get_carpark_availability", summary), ""]
             for d, r in hits:
                 out.append(_fmt_row(r, distance=int(d)))
+            out.append("")
+            out.append(footer(MSG_CARPARK_FEED))
             return "\n".join(out)
 
         if area:
@@ -122,12 +163,22 @@ def register_carpark_tools(mcp, lta: LTAClient) -> None:
             key=lambda r: int(r.get("AvailableLots", 0) or 0), reverse=True
         )
         matched = matched[:DISPLAY_CAP]
+        tail = f"(lot type {lot_type})"
         if not matched:
-            return "No carparks match the filters."
-        header = f"Carparks — {label} lots"
-        if area:
-            header += f" (area: {area})"
-        out = [header + ":", ""]
+            summary = (
+                f'0 carparks matching "{area}" {tail}'
+                if area
+                else f"0 carparks available {tail}"
+            )
+            return header("get_carpark_availability", summary)
+        summary = (
+            f'{len(matched)} carparks matching "{area}" {tail}'
+            if area
+            else f"{len(matched)} carparks available {tail}"
+        )
+        out = [header("get_carpark_availability", summary), ""]
         for r in matched:
             out.append(_fmt_row(r))
+        out.append("")
+        out.append(footer(MSG_CARPARK_FEED))
         return "\n".join(out)

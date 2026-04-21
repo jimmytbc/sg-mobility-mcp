@@ -3,10 +3,13 @@
 Two independent caches — bus stops (~5k rows) and bus routes (~27k
 rows) — each lazy-warmed on first use and held for 24 hours. An
 asyncio.Lock around each warm ensures concurrent tool calls don't
-double-fetch the same dataset.
+double-fetch the same dataset. The lock is released on exception so a
+failed warm doesn't poison subsequent calls (FR-3.3).
 
 Author: Jimmy Tong
 """
+
+from __future__ import annotations
 
 import asyncio
 import sys
@@ -36,25 +39,30 @@ class MobilityCache:
         self._routes_warmed_at: float = 0.0
         self._routes_lock = asyncio.Lock()
 
-    async def ensure_stops_warm(self, lta: "LTAClient") -> None:
+    async def ensure_stops_warm(self, lta: "LTAClient") -> bool:
+        """Warm the bus-stops cache if stale. Returns True iff this call
+        performed the upstream fetch."""
         async with self._stops_lock:
             if (
                 self.bus_stops
                 and time.time() - self._stops_warmed_at < self.TTL_SECONDS
             ):
-                return
+                return False
             stops = await lta.get_bus_stops()
             self.bus_stops = stops
             self._stops_warmed_at = time.time()
             print(f"[cache] warmed {len(stops)} bus stops", file=sys.stderr)
+            return True
 
-    async def ensure_routes_warm(self, lta: "LTAClient") -> None:
+    async def ensure_routes_warm(self, lta: "LTAClient") -> bool:
+        """Warm the bus-routes indexes if stale. Returns True iff this call
+        performed the upstream fetch."""
         async with self._routes_lock:
             if (
                 self.routes_by_service
                 and time.time() - self._routes_warmed_at < self.TTL_SECONDS
             ):
-                return
+                return False
             rows = await lta.get_bus_routes()
             by_service: dict[tuple[str, int], list[tuple[str, int, float]]] = {}
             by_stop: dict[str, list[tuple[str, int, int]]] = {}
@@ -83,3 +91,4 @@ class MobilityCache:
                 f"{len(by_service)} service-directions",
                 file=sys.stderr,
             )
+            return True

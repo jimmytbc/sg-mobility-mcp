@@ -42,6 +42,9 @@ htmlcov/
 # Local process / workspace notes — never commit
 CLAUDE.md
 tasks/
+specs/
+prompts/
+probes/
 
 # Jupyter
 .ipynb_checkpoints/

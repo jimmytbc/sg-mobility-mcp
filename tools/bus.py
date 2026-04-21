@@ -9,11 +9,37 @@ get_bus_arrivals — live ETAs enriched with the destination terminal
 Author: Jimmy Tong
 """
 
+from __future__ import annotations
+
 import math
 from datetime import datetime, timezone
 
+from api.errors import (
+    LTAAuthFailed,
+    LTAEndpointNotFound,
+    LTARateLimited,
+    LTATimeout,
+    UpstreamError,
+)
 from api.lta import LTAClient
 from cache import MobilityCache
+from tools._format import (
+    ERR_BUS_STOP_NOT_FOUND,
+    ERR_LTA_AUTH_FAILED,
+    ERR_LTA_ENDPOINT_NOT_FOUND,
+    ERR_LTA_RATE_LIMITED,
+    ERR_LTA_TIMEOUT,
+    MSG_BUS_ARRIVALS_LIVE,
+    MSG_ERR_LTA_AUTH_FAILED,
+    MSG_ERR_LTA_RATE_LIMITED,
+    MSG_ERR_LTA_TIMEOUT,
+    MSG_FIRST_CALL_WARM,
+    error,
+    footer,
+    header,
+    msg_err_bus_stop_not_found,
+    msg_err_lta_endpoint_not_found,
+)
 
 LOAD_LABELS = {
     "SEA": "Seats available",
@@ -60,6 +86,20 @@ def _fmt_bus(bus: dict) -> str:
     return f"{eta:<6s} ({source})       — {details}{accessible}"
 
 
+def _lta_error(exc: UpstreamError) -> str:
+    if isinstance(exc, LTAAuthFailed):
+        return error(ERR_LTA_AUTH_FAILED, MSG_ERR_LTA_AUTH_FAILED)
+    if isinstance(exc, LTARateLimited):
+        return error(ERR_LTA_RATE_LIMITED, MSG_ERR_LTA_RATE_LIMITED)
+    if isinstance(exc, LTAEndpointNotFound):
+        return error(
+            ERR_LTA_ENDPOINT_NOT_FOUND,
+            msg_err_lta_endpoint_not_found(exc.path),
+        )
+    # Default: treat generic upstream failures as timeouts.
+    return error(ERR_LTA_TIMEOUT, MSG_ERR_LTA_TIMEOUT)
+
+
 def register_bus_tools(mcp, lta: LTAClient, cache: MobilityCache) -> None:
     @mcp.tool()
     async def search_bus_stops(
@@ -69,28 +109,25 @@ def register_bus_tools(mcp, lta: LTAClient, cache: MobilityCache) -> None:
         radius_m: int = 500,
         limit: int = 10,
     ) -> str:
-        """Find Singapore bus stops by name or road, or by proximity to
-        coordinates.
+        """Find Singapore bus stops by name/road or proximity to coordinates.
 
-        Provide query for text search OR latitude+longitude for nearby stops.
-        If both are provided, geo search takes precedence. Returns stop code,
-        description, road name, and distance in geo mode. Use
-        resolve_location first if you only have a place name.
+        Provide `query` for text search OR `latitude`+`longitude` for nearby
+        stops; geo wins if both given. Returns stop code, description, road
+        name, and (geo mode) distance. Use resolve_location first for place
+        names.
 
-        Trip-planning guidance: when using this for route planning, do NOT
-        assume the nearest stop is the best. A stop 100–300m further may
-        serve a bus that goes directly to the destination, while the
-        closest stop only serves indirect / loop routes. Evaluate
-        get_bus_arrivals at the top 2–3 returned stops and compare each
-        service's destination terminal before recommending a route.
+        The nearest stop is not always best — check get_bus_arrivals at the
+        top 2-3 stops and compare destination terminals before recommending.
         """
         if query is None and (latitude is None or longitude is None):
             return "Provide either `query` or both `latitude` and `longitude`."
 
         try:
-            await cache.ensure_stops_warm(lta)
-        except RuntimeError as e:
-            return f"Could not load bus stop data: {e}"
+            did_warm = await cache.ensure_stops_warm(lta)
+        except UpstreamError as exc:
+            return _lta_error(exc)
+
+        warm_footer = footer(MSG_FIRST_CALL_WARM) if did_warm else None
 
         if latitude is not None and longitude is not None:
             hits: list[tuple[float, dict]] = []
@@ -106,20 +143,26 @@ def register_bus_tools(mcp, lta: LTAClient, cache: MobilityCache) -> None:
             hits.sort(key=lambda x: x[0])
             hits = hits[:limit]
             if not hits:
-                return (
-                    f"No bus stops within {radius_m}m of "
-                    f"({latitude:.4f}, {longitude:.4f})."
+                summary = (
+                    f"0 stops within {radius_m}m of "
+                    f"{latitude:.5f}, {longitude:.5f}"
                 )
-            lines = [
-                f"Bus stops within {radius_m}m of "
-                f"({latitude:.4f}, {longitude:.4f}):",
-                "",
-            ]
+                parts = [header("search_bus_stops", summary)]
+                if warm_footer:
+                    parts.extend(["", warm_footer])
+                return "\n".join(parts)
+            summary = (
+                f"{len(hits)} stops within {radius_m}m of "
+                f"{latitude:.5f}, {longitude:.5f}"
+            )
+            lines = [header("search_bus_stops", summary), ""]
             for d, s in hits:
                 code = str(s.get("BusStopCode", "?"))
                 desc = str(s.get("Description", ""))
                 road = str(s.get("RoadName", ""))
                 lines.append(f"{code:<6s} {desc:<22s} {road:<22s} {int(d)}m")
+            if warm_footer:
+                lines.extend(["", warm_footer])
             return "\n".join(lines)
 
         q = query.lower()  # type: ignore[union-attr]
@@ -130,13 +173,20 @@ def register_bus_tools(mcp, lta: LTAClient, cache: MobilityCache) -> None:
             or q in (s.get("RoadName", "") or "").lower()
         ][:limit]
         if not hits_text:
-            return f"No bus stops matching '{query}'."
-        lines = [f"Bus stops matching '{query}':", ""]
+            summary = f'0 stops matching "{query}"'
+            parts = [header("search_bus_stops", summary)]
+            if warm_footer:
+                parts.extend(["", warm_footer])
+            return "\n".join(parts)
+        summary = f'{len(hits_text)} stops matching "{query}"'
+        lines = [header("search_bus_stops", summary), ""]
         for s in hits_text:
             code = str(s.get("BusStopCode", "?"))
             desc = str(s.get("Description", ""))
             road = str(s.get("RoadName", ""))
             lines.append(f"{code:<6s} {desc:<22s} {road}")
+        if warm_footer:
+            lines.extend(["", warm_footer])
         return "\n".join(lines)
 
     @mcp.tool()
@@ -146,43 +196,55 @@ def register_bus_tools(mcp, lta: LTAClient, cache: MobilityCache) -> None:
     ) -> str:
         """Get real-time bus arrival times at a Singapore bus stop.
 
-        Returns next 3 buses per service with ETA, GPS or scheduled
-        indicator, passenger load, bus type, wheelchair accessibility,
-        and — importantly — the destination terminal each service heads
-        to, so you can tell which direction the bus is going.
+        Returns next 3 buses per service with ETA, GPS/scheduled flag,
+        passenger load, bus type, accessibility, and destination terminal —
+        so you can tell direction. Arrivals are AT the stop; do not infer
+        intermediate stops.
 
-        This tool returns only arrivals AT the given stop, not the full
-        route. Do not infer intermediate stops a bus passes through;
-        use the destination terminal shown to judge direction.
-
-        Trip-planning guidance: when planning a trip from a location,
-        call search_bus_stops to get 2–3 nearby stops, then call this
-        tool on EACH of those stops and compare services. A slightly
-        further walk to a stop with a direct bus is usually better than
-        the nearest stop on a loop / indirect route. Do not settle on
-        the nearest stop without checking the alternatives.
-
-        Use search_bus_stops to find the stop code if unknown.
+        Use search_bus_stops first for a stop code, or to compare 2-3 nearby
+        stops before picking one.
         """
+        # Validate stop code against the cache before calling LTA (FR-E.9).
         try:
-            data = await lta.get_bus_arrival(bus_stop_code, service_no)
-        except RuntimeError as e:
-            return f"Could not fetch bus arrivals for stop {bus_stop_code}: {e}"
+            did_warm = await cache.ensure_stops_warm(lta)
+        except UpstreamError as exc:
+            return _lta_error(exc)
 
-        services = data.get("Services", []) or []
-        if not services:
-            return f"No buses currently arriving at stop {bus_stop_code}."
-
-        try:
-            await cache.ensure_stops_warm(lta)
-        except RuntimeError:
-            pass  # fall back to showing codes only
         stop_names = {
             s.get("BusStopCode"): s.get("Description", "")
             for s in cache.bus_stops
         }
+        if bus_stop_code not in stop_names:
+            return error(
+                ERR_BUS_STOP_NOT_FOUND,
+                msg_err_bus_stop_not_found(bus_stop_code),
+            )
 
-        lines = [f"Bus arrivals — Stop {bus_stop_code}", ""]
+        try:
+            data = await lta.get_bus_arrival(bus_stop_code, service_no)
+        except UpstreamError as exc:
+            return _lta_error(exc)
+
+        services = data.get("Services", []) or []
+        stop_name = stop_names.get(bus_stop_code, "")
+        stop_label = (
+            f"{bus_stop_code} ({stop_name})" if stop_name else str(bus_stop_code)
+        )
+
+        if not services:
+            summary = f"No buses currently arriving at {stop_label}"
+            body_lines = [
+                header("get_bus_arrivals", summary),
+                "",
+                "Possible reasons: outside operating hours, or stop closed.",
+                "Verify the stop code via search_bus_stops if unexpected.",
+            ]
+            if did_warm:
+                body_lines.extend(["", footer(MSG_FIRST_CALL_WARM)])
+            return "\n".join(body_lines)
+
+        summary = f"{len(services)} services arriving at {stop_label}"
+        lines = [header("get_bus_arrivals", summary), ""]
         for svc in services:
             operator = svc.get("Operator", "")
             svc_no = svc.get("ServiceNo", "?")
@@ -193,17 +255,17 @@ def register_bus_tools(mcp, lta: LTAClient, cache: MobilityCache) -> None:
                     dest_code = str(bus["DestinationCode"])
                     break
 
-            header = f"Service {svc_no}"
+            svc_header = f"Service {svc_no}"
             if operator:
-                header += f" ({operator})"
+                svc_header += f" ({operator})"
             if dest_code:
                 name = stop_names.get(dest_code, "")
-                header += (
+                svc_header += (
                     f" → {name} ({dest_code})"
                     if name
                     else f" → terminates at stop {dest_code}"
                 )
-            lines.append(header)
+            lines.append(svc_header)
 
             slots = [
                 ("Next", svc.get("NextBus")),
@@ -215,4 +277,7 @@ def register_bus_tools(mcp, lta: LTAClient, cache: MobilityCache) -> None:
                     continue
                 lines.append(f"  {label} : {_fmt_bus(bus)}")
             lines.append("")
+        lines.append(footer(MSG_BUS_ARRIVALS_LIVE))
+        if did_warm:
+            lines.append(footer(MSG_FIRST_CALL_WARM))
         return "\n".join(lines).rstrip()

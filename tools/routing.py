@@ -8,16 +8,42 @@ ride + walk and ranked against the others.
 
 Time estimates are rough — 80 m/min walking, ~1.8 min per in-vehicle
 stop, and a 10 min assumed wait at the transfer point since we don't
-have scheduled intervals — and that is flagged in the tool's output.
+have scheduled intervals — and that is flagged in the tool's footer.
 
 Author: Jimmy Tong
 """
 
+from __future__ import annotations
+
 import math
 from datetime import datetime, timezone
 
+from api.errors import (
+    LTAAuthFailed,
+    LTAEndpointNotFound,
+    LTARateLimited,
+    LTATimeout,
+    UpstreamError,
+)
 from api.lta import LTAClient
 from cache import MobilityCache
+from tools._format import (
+    ERR_LTA_AUTH_FAILED,
+    ERR_LTA_ENDPOINT_NOT_FOUND,
+    ERR_LTA_RATE_LIMITED,
+    ERR_LTA_TIMEOUT,
+    ERR_NO_BUS_ROUTE,
+    MSG_BUS_ROUTE_ESTIMATES,
+    MSG_ERR_LTA_AUTH_FAILED,
+    MSG_ERR_LTA_RATE_LIMITED,
+    MSG_ERR_LTA_TIMEOUT,
+    MSG_FIRST_CALL_WARM,
+    error,
+    footer,
+    header,
+    msg_err_lta_endpoint_not_found,
+    msg_err_no_bus_route,
+)
 
 WALK_M_PER_MIN = 80
 RIDE_MIN_PER_STOP = 1.8
@@ -75,6 +101,19 @@ def _candidate_stops(
     return hits
 
 
+def _lta_error(exc: UpstreamError) -> str:
+    if isinstance(exc, LTAAuthFailed):
+        return error(ERR_LTA_AUTH_FAILED, MSG_ERR_LTA_AUTH_FAILED)
+    if isinstance(exc, LTARateLimited):
+        return error(ERR_LTA_RATE_LIMITED, MSG_ERR_LTA_RATE_LIMITED)
+    if isinstance(exc, LTAEndpointNotFound):
+        return error(
+            ERR_LTA_ENDPOINT_NOT_FOUND,
+            msg_err_lta_endpoint_not_found(exc.path),
+        )
+    return error(ERR_LTA_TIMEOUT, MSG_ERR_LTA_TIMEOUT)
+
+
 def register_routing_tools(
     mcp, lta: LTAClient, cache: MobilityCache
 ) -> None:
@@ -92,33 +131,56 @@ def register_routing_tools(
         """Find the best bus journeys between two Singapore coordinates.
 
         Tries direct single-bus routes first, then 1-transfer journeys
-        (bus A, short walk, bus B). Each candidate is scored by total
-        walk + wait + ride + walk; returns the top `limit` across direct
-        and transfer options together.
+        (bus A, short walk, bus B). Ranks candidates by total walk + wait
+        + ride + walk and returns the top `limit`.
 
-        Use resolve_location first if you only have place names. Use
-        this BEFORE manually chaining search_bus_stops + get_bus_arrivals
-        — this tool already does the comparison server-side.
-
-        If no bus route (direct or 1-transfer) exists within the walk
-        radii, the tool says so; fall back to MRT or multi-leg planning.
-        Does not plan MRT or 2+ transfer journeys.
+        Use resolve_location first for place names. Prefer this over
+        chaining search_bus_stops + get_bus_arrivals — it does the
+        comparison server-side. No MRT or 2+ transfers.
         """
         try:
-            await cache.ensure_stops_warm(lta)
-            await cache.ensure_routes_warm(lta)
-        except RuntimeError as e:
-            return f"Could not load route data: {e}"
+            did_warm_stops = await cache.ensure_stops_warm(lta)
+            did_warm_routes = await cache.ensure_routes_warm(lta)
+        except UpstreamError as exc:
+            return _lta_error(exc)
+        did_warm = did_warm_stops or did_warm_routes
+
+        def _err_no_route() -> str:
+            return error(
+                ERR_NO_BUS_ROUTE,
+                msg_err_no_bus_route(
+                    from_latitude,
+                    from_longitude,
+                    to_latitude,
+                    to_longitude,
+                    max_walk_m,
+                    max_transfer_walk_m,
+                    max_total_min,
+                ),
+            )
 
         # Short-circuit trivial distance
         direct_m = _haversine_m(
             from_latitude, from_longitude, to_latitude, to_longitude
         )
         if direct_m < 300:
-            return (
+            body = (
                 f"The origin and destination are only {int(direct_m)}m apart "
                 "— walking is likely faster than taking a bus."
             )
+            lines = [
+                header(
+                    "find_bus_route",
+                    f"walking suggested from "
+                    f"({from_latitude:.5f}, {from_longitude:.5f}) to "
+                    f"({to_latitude:.5f}, {to_longitude:.5f})",
+                ),
+                "",
+                body,
+            ]
+            if did_warm:
+                lines.extend(["", footer(MSG_FIRST_CALL_WARM)])
+            return "\n".join(lines)
 
         origins = _candidate_stops(
             cache, from_latitude, from_longitude, max_walk_m
@@ -128,11 +190,7 @@ def register_routing_tools(
         )
 
         if not origins or not dests:
-            return (
-                f"No bus stops within {max_walk_m}m of "
-                f"{'origin' if not origins else 'destination'}. "
-                "Increase max_walk_m or choose different points."
-            )
+            return _err_no_route()
 
         stop_coords: dict[str, tuple[float, float]] = {}
         stop_names: dict[str, str] = {}
@@ -176,9 +234,6 @@ def register_routing_tools(
                         )
 
         # ---------- Transfer candidates ----------
-        # Forward reach: for each origin bus, every stop it passes after the origin
-        # is a potential alight (transfer start) point.
-        # forward_reach: alight_stop_code -> list of leg1 dicts
         forward_reach: dict[str, list[dict]] = {}
         for o_code, o_desc, o_walk in origins:
             for o_svc, o_dir, o_seq in cache.routes_by_stop.get(o_code, []):
@@ -200,8 +255,6 @@ def register_routing_tools(
                         }
                     )
 
-        # Backward reach: for each dest bus, every stop it passes BEFORE the dest
-        # is a potential board (transfer end) point.
         backward_reach: dict[str, list[dict]] = {}
         for d_code, d_desc, d_walk in dests:
             for d_svc, d_dir, d_seq in cache.routes_by_stop.get(d_code, []):
@@ -223,8 +276,6 @@ def register_routing_tools(
                         }
                     )
 
-        # Intersect: for each alight stop in forward_reach, check board stops in
-        # backward_reach within transfer-walk range.
         transfer_candidates: list[dict] = []
         backward_items = list(backward_reach.items())
         for alight_code, leg1_list in forward_reach.items():
@@ -245,7 +296,6 @@ def register_routing_tools(
                         continue
                 for leg1 in leg1_list:
                     for leg2 in leg2_list:
-                        # Skip pointless same-service-same-direction transfer
                         if (
                             leg1["service_A"] == leg2["service_B"]
                             and leg1["direction_A"] == leg2["direction_B"]
@@ -261,12 +311,7 @@ def register_routing_tools(
                         )
 
         if not direct_candidates and not transfer_candidates:
-            return (
-                f"No direct or 1-transfer bus route found from "
-                f"({from_latitude:.4f}, {from_longitude:.4f}) to "
-                f"({to_latitude:.4f}, {to_longitude:.4f}) within the walk "
-                f"radii. Consider MRT or a multi-leg route."
-            )
+            return _err_no_route()
 
         # ---------- Live ETAs for all unique origin stops ----------
         origin_stops = {c["origin_code"] for c in direct_candidates}
@@ -275,7 +320,7 @@ def register_routing_tools(
         for o_code in origin_stops:
             try:
                 data = await lta.get_bus_arrival(o_code)
-            except RuntimeError:
+            except UpstreamError:
                 continue
             for svc in data.get("Services", []) or []:
                 svc_no = svc.get("ServiceNo")
@@ -319,21 +364,14 @@ def register_routing_tools(
                 + wait_B + ride_B + walk_from
             )
 
-        # ---------- Filter by max_total_min ----------
         all_candidates = [
             c
             for c in (direct_candidates + transfer_candidates)
             if c["total_min"] <= max_total_min
         ]
         if not all_candidates:
-            return (
-                f"Bus options exist but all exceed the {max_total_min}-minute "
-                "cap. Consider MRT or raise max_total_min."
-            )
+            return _err_no_route()
 
-        # ---------- Dedupe ----------
-        # Direct: best per service
-        # Transfer: best per (service_A, service_B) pair
         best: dict[tuple, dict] = {}
         for c in all_candidates:
             if c["kind"] == "direct":
@@ -344,13 +382,12 @@ def register_routing_tools(
                 best[key] = c
         ranked = sorted(best.values(), key=lambda x: x["total_min"])[:limit]
 
-        # ---------- Format ----------
-        lines = [
-            f"Best bus routes from ({from_latitude:.4f}, "
-            f"{from_longitude:.4f}) to ({to_latitude:.4f}, "
-            f"{to_longitude:.4f}):",
-            "",
-        ]
+        summary = (
+            f"{len(ranked)} options from "
+            f"({from_latitude:.5f}, {from_longitude:.5f}) to "
+            f"({to_latitude:.5f}, {to_longitude:.5f})"
+        )
+        lines = [header("find_bus_route", summary), ""]
         for i, c in enumerate(ranked, 1):
             if c["kind"] == "direct":
                 route = cache.routes_by_service.get(
@@ -444,9 +481,7 @@ def register_routing_tools(
                 )
                 lines.append("")
 
-        lines.append(
-            "Totals are estimates (walk 80 m/min, ~1.8 min per in-vehicle "
-            f"stop, ~{TRANSFER_WAIT_MIN} min assumed wait at any transfer). "
-            "Live ETA is from LTA; actual times vary with traffic."
-        )
+        lines.append(footer(MSG_BUS_ROUTE_ESTIMATES))
+        if did_warm:
+            lines.append(footer(MSG_FIRST_CALL_WARM))
         return "\n".join(lines)
