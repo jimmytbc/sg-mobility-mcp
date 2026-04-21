@@ -568,7 +568,7 @@ origin, estimates in-vehicle and transfer times, and ranks the top
 **Example prompt:** _"What's the best bus from Bedok Mall to Gleneagles Hospital?"_
 
 **Returns** ranked direct and 1-transfer options with: origin stop code
-+ walk distance, live ETA, ride stop count, alight stop (and, for
++ walk distance, live ETA, ride stop count, alight stop (for
 transfers, board stop + transfer walk), terminus for each leg, and
 estimated total journey time.
 
