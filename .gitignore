@@ -45,6 +45,7 @@ tasks/
 specs/
 prompts/
 probes/
+scratch/
 
 # Jupyter
 .ipynb_checkpoints/

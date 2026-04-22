@@ -64,6 +64,17 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _stop_label(s: dict) -> str:
+    """'<description>, <road>' — ensures stops like 'Blk 220C' aren't
+    ambiguous across estates by pairing the block with its road name.
+    Falls back to whichever side is present if the other is blank."""
+    desc = str(s.get("Description", "") or "").strip()
+    road = str(s.get("RoadName", "") or "").strip()
+    if desc and road:
+        return f"{desc}, {road}"
+    return desc or road
+
+
 def _parse_eta_min(iso: str) -> int | None:
     if not iso:
         return None
@@ -94,7 +105,7 @@ def _candidate_stops(
             hits.append(
                 (
                     str(s.get("BusStopCode", "")),
-                    str(s.get("Description", "")),
+                    _stop_label(s),
                     d,
                 )
             )
@@ -202,7 +213,7 @@ def register_routing_tools(
                 stop_coords[code] = (float(s["Latitude"]), float(s["Longitude"]))
             except (KeyError, ValueError, TypeError):
                 continue
-            stop_names[code] = str(s.get("Description", ""))
+            stop_names[code] = _stop_label(s)
 
         # ---------- Direct candidates ----------
         dest_info = {d[0]: d for d in dests}
