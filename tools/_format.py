@@ -119,6 +119,10 @@ MSG_BUS_ROUTE_ESTIMATES = (
 )
 MSG_CARPARK_FEED = "live LTA feed; not all private carparks included."
 MSG_BUS_ARRIVALS_LIVE = "load and accessibility from LTA live feed."
+MSG_TRUNCATED_2T = (
+    "2-transfer evaluation truncated at 500 candidates; "
+    "results are best-found-so-far."
+)
 
 
 # ---------------------------------------------------------------------------
