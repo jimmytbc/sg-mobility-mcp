@@ -15,13 +15,13 @@ Plug it into your agent and say things like:
 > 4. Plan my public-transport day."_
 
 The agent chains the eight tools (geocoding → reverse geocoding →
-stop search → live arrivals → direct/1-transfer bus ranking →
-disruption check → carpark lookup → one-shot location context) and
-returns a real itinerary: which bus from which stop, live ETAs,
-correct service numbers, destination terminals so it picks the right
-direction, and walking distances sanity-checked against actual
-coordinates. No more hallucinated bus 58 to "Tampines MRT" when bus 58
-actually terminates at Bishan.
+stop search → live arrivals → direct / 1-transfer / 2-transfer bus
+ranking → disruption check → carpark lookup → one-shot location
+context) and returns a real itinerary: which bus from which stop,
+live ETAs, correct service numbers, destination terminals so it
+picks the right direction, and walking distances sanity-checked
+against actual coordinates. No more hallucinated bus 58 to "Tampines
+MRT" when bus 58 actually terminates at Bishan.
 
 ### Why it exists
 
@@ -85,7 +85,7 @@ assistant orchestrate it end to end on your behalf.
 | `reverse_geocode` | Coordinates → up to 3 nearby building names and full addresses |
 | `search_bus_stops` | Find stops by name, road, or proximity to coordinates |
 | `get_bus_arrivals` | Live bus ETAs, load, type, accessibility, **destination terminal** |
-| `find_bus_route` | Ranked **direct or 1-transfer bus** journeys between two coordinates (walk + wait + ride + transfer + ride + walk) |
+| `find_bus_route` | Ranked **direct, 1-transfer, or 2-transfer bus** journeys between two coordinates (walk + wait + ride + transfer + ride + walk), scored server-side |
 | `get_train_alerts` | MRT/LRT service disruptions, optionally filtered by line |
 | `get_carpark_availability` | Real-time carpark lots across HDB, URA, LTA |
 | `get_location_context` | One-shot summary of nearby bus stops, carparks, MRT/LRT stations, and line status for a coordinate |
@@ -571,33 +571,63 @@ with ETA, GPS/scheduled indicator, load, bus type, wheelchair access, and
 
 ---
 
-### `find_bus_route(from_latitude, from_longitude, to_latitude, to_longitude, max_walk_m=600, max_transfer_walk_m=200, max_total_min=90, limit=3) -> str`
+### `find_bus_route(from_latitude, from_longitude, to_latitude, to_longitude, max_walk_m=600, max_transfer_walk_m=200, max_total_min=120, limit=3) -> str`
 
 **The recommended tool for trip planning.** Given origin and destination
-coordinates, this tool finds the best bus journeys — direct or with one
-transfer — scored server-side by total time. It evaluates every candidate
-origin and destination stop within `max_walk_m`, looks for services that
-serve both directly (with the correct direction) AND pairs of services
-that share an interchange stop reachable within `max_transfer_walk_m`
-for a 1-transfer journey. For each candidate it fetches live ETA at the
-origin, estimates in-vehicle and transfer times, and ranks the top
-`limit` options by **total walk + wait + ride + (transfer walk + wait
-+ ride) + walk**.
+coordinates, this tool finds the best bus journeys — **direct,
+1-transfer, or 2-transfer** — scored server-side by total time. It
+evaluates every candidate origin and destination stop within
+`max_walk_m`, looks for:
 
-**Example prompt:** _"What's the best bus from Bedok Mall to Gleneagles Hospital?"_
+- **Direct** services that serve both origin and destination stops in
+  the correct direction.
+- **1-transfer** service pairs that share an interchange stop
+  reachable within `max_transfer_walk_m`.
+- **2-transfer** service triples (bus A → walk → bus B → walk → bus C),
+  where each transfer walk is within `max_transfer_walk_m`. Added in
+  v0.2 for cross-island pairs where no good direct or single-transfer
+  option exists.
 
-**Returns** ranked direct and 1-transfer options with: origin stop code
-+ walk distance, live ETA, ride stop count, alight stop (for
-transfers, board stop + transfer walk), terminus for each leg, and
-estimated total journey time.
+For each candidate it fetches live ETA at the origin, estimates
+in-vehicle and transfer times, and ranks the top `limit` options by
+**total walk + wait + ride** time.
 
-If no direct or 1-transfer bus exists within the walk radii, or every
-option exceeds `max_total_min` (default 90), the tool says so — fall
-back to MRT or multi-leg planning.
+**Example prompts:**
+- _"What's the best bus from Bedok Mall to Gleneagles Hospital?"_ (likely 1-transfer)
+- _"How do I get from Sengkang to Tuas Link by bus?"_ (likely 2-transfer — cross-island)
+
+**Returns** ranked options with: origin stop code + walk distance,
+live ETA, ride stop count, alight stop (for transfers, board stop +
+transfer walk), terminus for each leg, and estimated total journey
+time. 2-transfer options use a distinct `OPTION N — 2-TRANSFER — M
+min total` header to signal the leg count; direct and 1-transfer
+keep the original `{i}. Bus X → ...` header shape for backward
+compatibility.
+
+**Bounds:**
+- Direct + 1-transfer options are capped at **90 min** total time
+  regardless of `max_total_min` (preserving v0.1.0 behaviour).
+- 2-transfer options use `max_total_min` (default **120 min**, raised
+  in v0.2 from 90 to accommodate the extra transfer wait). The caller
+  can override; passing a tighter `max_total_min` applies to all
+  kinds.
+- 2-transfer enumeration is capped at **500 candidate triples** per
+  call to prevent combinatorial blow-up. If hit, the response appends
+  `Note: 2-transfer evaluation truncated at 500 candidates; results
+  are best-found-so-far.` — only when a 2-transfer option actually
+  surfaced in the ranked output. Enumeration is ordered by
+  cost-promising heuristics (shortest middle-leg ride first, shortest
+  origin/destination walk first) so early termination still yields
+  good results.
+
+If no direct, 1-transfer, or 2-transfer option is found within the
+constraints, the tool returns `ERR_NO_BUS_ROUTE` — fall back to MRT
+or loosen the walk radii.
 
 **Honest limits**: transfer wait time is a fixed 10-minute assumption
-(we don't have scheduled intervals). In-vehicle time is a flat ~1.8
-min/stop estimate. Totals are flagged as estimates in the output.
+per transfer point (we don't have scheduled intervals). In-vehicle
+time is a flat ~1.8 min/stop estimate. Totals are flagged as
+estimates in the output. No MRT routing — see Limitations.
 
 ---
 
@@ -680,13 +710,20 @@ Patterns that work well in practice:
 Claude calls `resolve_location` → `search_bus_stops` (geo) →
 `get_bus_arrivals(service_no="15")`. Three tool calls, one clean answer.
 
-### 2. Best direct bus between two landmarks
+### 2. Best bus between two landmarks
 
 > What's the fastest bus from Compass One to Tampines Mall?
 
-Claude calls `resolve_location` twice then `find_bus_route`. The tool does
-the multi-stop comparison server-side and ranks by total time — you get
-the best option directly, not just the nearest stop's first bus.
+Claude calls `resolve_location` twice then `find_bus_route`. The tool
+evaluates direct, 1-transfer, and (if needed) 2-transfer options
+server-side and ranks them by total time — you get the best option
+directly, not just the nearest stop's first bus.
+
+For cross-island pairs like **Sengkang → Tuas Link** where no good
+direct or single-transfer option exists, `find_bus_route` will surface
+2-transfer options labelled `OPTION N — 2-TRANSFER — M min total`,
+complete with the two transfer blocks. This is v0.2's key routing
+upgrade over v0.1.0.
 
 ### 3. Find parking near a destination
 
@@ -713,7 +750,8 @@ Behind the scenes your agent will:
    ride scoring so the agent gets a ranked answer, not a bus number to
    guess between.
 3. Fall back to MRT when `find_bus_route` returns nothing (or every
-   option exceeds the 90-min cap) — your agent fills in train legs
+   option exceeds the 120-min cap for 2-transfer journeys, or
+   90-min for direct/1-transfer) — your agent fills in train legs
    from general knowledge, knowing the bus options were genuinely
    checked.
 4. Optionally `get_train_alerts` to check for disruptions before
@@ -829,9 +867,12 @@ Small, flat, explicit — no framework, no database, no background workers.
 
 Be honest with users about what this server does not do:
 
-1. **`find_bus_route` supports direct and 1-transfer journeys.** Two or
-   more bus transfers are not planned; if the best route needs multiple
-   hops, the tool says so and you fall back to MRT.
+1. **`find_bus_route` supports up to 2 bus transfers (3 buses).**
+   Three or more transfers are not planned; if the best route needs
+   more hops, the tool returns `ERR_NO_BUS_ROUTE` and you fall back
+   to MRT. The 2-transfer search is bounded by a 500-candidate
+   evaluation cap — for cross-island pairs you may see a "best-found-
+   so-far" note rather than a guaranteed-optimal result.
 2. **No MRT routing.** The server does not plan MRT rides or
    transfers. It _does_ know where the 181 operational MRT/LRT
    stations are (via the bundled catalog) — enough for
