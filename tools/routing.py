@@ -871,14 +871,14 @@ def register_routing_tools(
         limit: int = 3,
     ) -> str:
         """Finds best bus journeys (direct, 1-transfer, or 2-transfer)
-        between two Singapore coordinates. Returns ranked options scored
-        by total walk + wait + ride. Direct/1-transfer capped at 90
-        min; 2-transfer uses max_total_min (default 120) and caps at
-        500 candidates per call — truncation is noted.
+        between two Singapore coordinates. Returns options ranked by
+        total walk + wait + ride — option 1 is the fastest; preserve
+        this ordering when recommending to the user. Direct/1-transfer
+        capped at 90 min; 2-transfer uses max_total_min (default 120)
+        and caps at 500 candidates per call — truncation is noted.
 
-        Use resolve_location first for place names. Prefer this over
-        chaining search_bus_stops + get_bus_arrivals — server-side
-        ranking. No MRT routing.
+        Use resolve_location first for place names. For unified bus +
+        walk + MRT-hint discovery, prefer find_route.
         """
         return await find_bus_route_impl(
             lta,

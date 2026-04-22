@@ -14,14 +14,22 @@ Plug it into your agent and say things like:
 > hospital visit at Napier Road at 2:30, and a class in Marine Parade at
 > 4. Plan my public-transport day."_
 
-The agent chains the eight tools (geocoding → reverse geocoding →
+The agent chains the nine tools (geocoding → reverse geocoding →
 stop search → live arrivals → direct / 1-transfer / 2-transfer bus
 ranking → disruption check → carpark lookup → one-shot location
-context) and returns a real itinerary: which bus from which stop,
-live ETAs, correct service numbers, destination terminals so it
-picks the right direction, and walking distances sanity-checked
-against actual coordinates. No more hallucinated bus 58 to "Tampines
-MRT" when bus 58 actually terminates at Bishan.
+context → unified "best route A to B" discovery) and returns a real
+itinerary: which bus from which stop, live ETAs, correct service
+numbers, destination terminals so it picks the right direction, and
+walking distances sanity-checked against actual coordinates. No more
+hallucinated bus 58 to "Tampines MRT" when bus 58 actually terminates
+at Bishan.
+
+**v0.2 additions over v0.1.0:** standardized output envelope across
+all tools, `reverse_geocode` (coordinates → addresses),
+`get_location_context` (one-shot "what's near here?"), 2-transfer bus
+routing with cost-promising enumeration, `find_route` (unified bus +
+walking + MRT-hint dispatcher), LTA 429 backoff, and cache concurrency
+locks. See [`CHANGELOG.md`](CHANGELOG.md) for the full cycle summary.
 
 ### Why it exists
 
@@ -77,7 +85,7 @@ assistant orchestrate it end to end on your behalf.
 | **Data sources** | LTA DataMall, OneMap, bundled MRT/LRT station catalog |
 | **Runtime deps** | 4 packages (`mcp[cli]`, `httpx`, `pydantic`, `python-dotenv`) |
 
-**Eight tools registered:**
+**Nine tools registered:**
 
 | Tool | What it does |
 |---|---|
@@ -89,6 +97,7 @@ assistant orchestrate it end to end on your behalf.
 | `get_train_alerts` | MRT/LRT service disruptions, optionally filtered by line |
 | `get_carpark_availability` | Real-time carpark lots across HDB, URA, LTA |
 | `get_location_context` | One-shot summary of nearby bus stops, carparks, MRT/LRT stations, and line status for a coordinate |
+| `find_route` | Unified "best route A → B" dispatcher: ranks bus options (via `find_bus_route`) + walking estimate + MRT-suggestion hint in a single call |
 
 ---
 
@@ -699,6 +708,63 @@ line alerts for you.
 
 ---
 
+### `find_route(from_latitude, from_longitude, to_latitude, to_longitude) -> str`
+
+**Unified "best route from A to B" dispatcher.** Given an origin and a
+destination coordinate, returns a single ranked list combining bus
+options, a straight-line walking estimate, and an MRT-suggestion hint —
+without the agent having to chain `find_bus_route` + walking calc + MRT
+lookup itself.
+
+In one response, you get:
+
+- **Bus options** — the top-ranked journeys from `find_bus_route` (up to
+  2 transfers), relabelled `OPTION N — BUS — M min total` and sorted by
+  estimated time. The per-leg body is delegated unchanged, so stop codes,
+  live ETAs, and per-leg timings match what `find_bus_route` would have
+  produced on its own.
+- **Walking option** — included when the straight-line walk is under 25
+  minutes (at the 80 m/min v0.1.0 assumption), formatted
+  `OPTION N — WALK — M min (D km)`. Omitted otherwise with a footer
+  noting the omission. As a fallback, walking is included anyway when
+  no bus and no MRT option exists.
+- **MRT suggestion** — if both endpoints are within 800 m of an MRT or
+  LRT station (per the Phase 2 catalog), the output includes an
+  `OPTION N — MRT SUGGESTION` block naming the board and alight
+  candidates, their codes, lines, and walk distances. This is a hint,
+  not a routed plan — `find_route` does not compute MRT travel time or
+  the transfer interchange (the agent fills those in from general
+  knowledge, per R10). The hint also covers LRT: Sengkang, Punggol, and
+  Bukit Panjang LRT stations are surfaced the same way.
+
+**Ranking**: bus and walking options are sorted ascending by estimated
+total time. The MRT suggestion has no time estimate and appears last.
+
+**Long-distance short-circuit**: if the straight-line distance exceeds
+~25 km (cross-island extreme), `find_route` skips the bus enumeration
+entirely and returns just the MRT suggestion + walking fallback. This
+keeps per-call latency bounded for the worst-case pairs and is the
+prescribed fallback for RISK-11.
+
+**Latency**: under 7 s at the 95th percentile for typical Singapore
+pairs after cache warm. First call may take longer due to cache warm
+(surfaced via the same `MSG_FIRST_CALL_WARM` footer as `find_bus_route`).
+
+**Example prompts:**
+- _"Best route from Compass One to Outram Park?"_
+- _"How do I get from Tuas Link to Changi Airport?"_ (triggers the
+  long-distance short-circuit)
+- _"Best way from Sengkang to Vivocity?"_
+
+**When to use vs. chaining:** this is the recommended starting point for
+"best route from A to B" questions. Prefer `find_route` over chaining
+`find_bus_route` + walking calc + MRT lookup manually.
+`get_train_alerts` is a deliberate separate call — `find_route` never
+calls it, so the agent must call `get_train_alerts` or
+`get_location_context` separately if alert awareness is needed.
+
+---
+
 ## Use cases
 
 Patterns that work well in practice:
@@ -710,20 +776,25 @@ Patterns that work well in practice:
 Claude calls `resolve_location` → `search_bus_stops` (geo) →
 `get_bus_arrivals(service_no="15")`. Three tool calls, one clean answer.
 
-### 2. Best bus between two landmarks
+### 2. Best route between two landmarks
 
-> What's the fastest bus from Compass One to Tampines Mall?
+> What's the fastest route from Compass One to Outram Park?
 
-Claude calls `resolve_location` twice then `find_bus_route`. The tool
-evaluates direct, 1-transfer, and (if needed) 2-transfer options
-server-side and ranks them by total time — you get the best option
-directly, not just the nearest stop's first bus.
+Claude calls `resolve_location` twice then `find_route`. The tool
+composes bus options (direct, 1-transfer, or 2-transfer via
+`find_bus_route`), a straight-line walking estimate when the pair is
+close, and an MRT-suggestion hint when both endpoints are within 800 m
+of a station — all ranked and returned in one call.
+
+Prefer `find_route` as the entry point for "best route A → B" queries.
+Use `find_bus_route` directly only when you need the raw bus-only
+ranking (e.g., explicit walk-radius or max-time overrides, or debugging).
 
 For cross-island pairs like **Sengkang → Tuas Link** where no good
-direct or single-transfer option exists, `find_bus_route` will surface
-2-transfer options labelled `OPTION N — 2-TRANSFER — M min total`,
-complete with the two transfer blocks. This is v0.2's key routing
-upgrade over v0.1.0.
+direct or single-transfer option exists, `find_route` (via
+`find_bus_route`) will surface 2-transfer options labelled
+`OPTION N — BUS (2-TRANSFER) — M min total`, complete with the two
+transfer blocks. This is v0.2's key routing upgrade over v0.1.0.
 
 ### 3. Find parking near a destination
 
@@ -877,19 +948,24 @@ Be honest with users about what this server does not do:
    transfers. It _does_ know where the 181 operational MRT/LRT
    stations are (via the bundled catalog) — enough for
    `get_location_context` to surface "there's an MRT station X metres
-   away on lines Y, Z" — but it will not compute a train journey
-   between stations. When a trip needs MRT, the agent fills in the route
-   from general knowledge. The station catalog is reviewed quarterly
-   (see `data/README.md`); new stations opened since the last review
-   may be missing.
+   away on lines Y, Z" and for `find_route` to emit a board/alight
+   candidate hint when both endpoints are within 800 m of a station
+   — but it will not compute a train journey between stations.
+   `find_route` explicitly does not return MRT travel time or a
+   computed interchange station. When a trip needs MRT, the agent
+   fills in the route from general knowledge. The station catalog is
+   reviewed quarterly (see `data/README.md`); new stations opened
+   since the last review may be missing.
 3. **In-vehicle time, walking speed, and transfer wait are estimates.**
    `find_bus_route` uses a flat ~1.8 minutes per stop, 80 m/min walking,
    and a fixed 10-minute wait at any transfer point (we don't have
    scheduled intervals). Real bus rides vary with traffic,
    express-vs-local service patterns, and time of day.
-4. **No walking-only planner.** If the two points are close enough that
-   walking is fastest, `find_bus_route` will short-circuit with a
-   suggestion to walk — but it won't compute walking directions.
+4. **No walking-directions planner.** `find_route` includes a
+   straight-line walking estimate (distance / 80 m/min) as a ranked
+   option when it's under 25 minutes, and `find_bus_route` short-
+   circuits with a "walk is faster" note for very short pairs. Neither
+   computes turn-by-turn walking directions.
 5. **Carpark data comes from LTA's feed** — not every carpark in Singapore
    is included (e.g. some private ones).
 6. **Singapore only.** The data sources are Singapore-specific; this

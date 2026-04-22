@@ -123,6 +123,10 @@ MSG_TRUNCATED_2T = (
     "2-transfer evaluation truncated at 500 candidates; "
     "results are best-found-so-far."
 )
+MSG_MRT_SUGGESTION = (
+    "this is a suggestion; route the trains using your own knowledge."
+)
+MSG_NO_WALK_LONG = "walking option not shown (>25 min direct walk)."
 
 
 # ---------------------------------------------------------------------------

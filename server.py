@@ -22,6 +22,7 @@ from cache import MobilityCache
 from tools.bus import register_bus_tools
 from tools.carpark import register_carpark_tools
 from tools.context import register_context_tools
+from tools.discovery import register_discovery_tools
 from tools.location import register_location_tools
 from tools.routing import register_routing_tools
 from tools.train import register_train_tools
@@ -90,6 +91,7 @@ register_train_tools(mcp, lta)
 register_carpark_tools(mcp, lta)
 register_routing_tools(mcp, lta, cache)
 register_context_tools(mcp, lta, cache, mrt_stations)
+register_discovery_tools(mcp, lta, cache, mrt_stations)
 
 
 if __name__ == "__main__":

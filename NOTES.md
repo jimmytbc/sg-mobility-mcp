@@ -87,6 +87,81 @@ MRT within walking distance — but the default was a false start.
 
 ---
 
+## resolve_location misses on bare HDB block numbers
+
+*Observed 2026-04-22 during Phase 4 verification.*
+
+`resolve_location("Blk 263")` and `resolve_location("Blk 405A")`
+failed to pin the specific blocks. The agent fell back to a rough
+point along the nearest named road (e.g., "Punggol Way corridor").
+For Blk 405A, the fallback landed south of the actual block — close
+enough to Damai LRT (PE7) that `find_route`'s MRT suggestion named
+Damai instead of the correct nearest station, Samudera (PW4), which
+is ~200m from Blk 405A's real coordinates. `find_route` is behaving
+correctly given its inputs; the geocoder is the weak link.
+
+- **Fix shape A**: enrich `resolve_location` with an HDB-block
+  fallback — if the query matches `^Blk(?:ock)?\s+\d+[A-Z]?` and
+  OneMap returns no direct hit, try appending the estate
+  (Compassvale, Rivervale, Punggol Field, etc.) from context, or
+  surface a targeted re-ask ("which estate is Blk 405A in?")
+  instead of silently approximating.
+- **Fix shape B**: a dedicated `resolve_hdb_block(block, estate)`
+  tool — narrower signature, OneMap's block-search parameters are
+  richer than the generic search.
+- **Effort**: A ≈ 1–2 hours (regex + re-ask path). B ≈ half-day
+  (new tool, probe, docs). Either way, localised to OneMap path.
+
+---
+
+## find_route MRT suggestion limited to single nearest station
+
+*Observed 2026-04-22 during Phase 4 verification.*
+
+`find_route` emits one `Board candidate` and one `Alight candidate`
+— the station nearest each endpoint within 800m. If the geocoded
+coordinates are slightly off (see bare-HDB-block issue above), or
+if a slightly-further station would give a better line match (e.g.,
+origin has two stations at 600m and 700m on different lines, one
+shared with the destination's station), the tool picks geographic
+nearest rather than route-optimal. An agent cannot recover what the
+tool didn't surface.
+
+- **Fix shape**: emit up to 3 candidate stations per endpoint,
+  ranked by walking distance, letting the agent pick the
+  route-optimal pairing. §5.1 mock-up would need a minor update
+  (plural `Board candidates:` block). Schema change is additive
+  per R9.
+- **Effort**: ~1 hour in `tools/discovery.py` + spec amendment
+  + mock-up update. Low risk, no upstream-API impact.
+
+---
+
+## "47m walk" in find_route MRT block misread as minutes by the agent
+
+*Observed 2026-04-22 during Phase 4 verification (Scenario 3,
+Tuas Link → Changi Airport).*
+
+`find_route`'s MRT SUGGESTION body uses the project-wide §5.2
+distance convention: `47m walk from origin`, `36m walk to
+destination`. For small values (<100m) the agent rendered these
+as "~47 min walk" / "~36 min" in its narrative — mistaking metres
+for minutes. The values are plausible as either unit in a travel
+context, so the LLM guessed wrong.
+
+- **Fix shape**: in `tools/discovery.py`, emit distances as
+  `47 m walk from origin` (space) or `47 metres walk from origin`
+  within the MRT block only. Conflicts with §5.2's `<n>m` rule, so
+  a spec amendment is warranted. Alternatively, add explicit
+  qualifier: `— 47m (distance) walk from origin`.
+- **Relevance**: agent-readability, not correctness. The tool is
+  emitting the right value; the unit is just ambiguous when
+  context-free.
+- **Effort**: ~10 min code + spec amendment in §5.2 / §5.4.
+  Low risk, output-only change.
+
+---
+
 ## MRT interchange transfer walk times not represented
 
 *Observed 2026-04-22.*
