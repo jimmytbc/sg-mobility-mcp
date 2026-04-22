@@ -14,13 +14,14 @@ Plug it into your agent and say things like:
 > hospital visit at Napier Road at 2:30, and a class in Marine Parade at
 > 4. Plan my public-transport day."_
 
-The agent chains the six tools (geocoding → stop search → live arrivals →
-direct-bus ranking → disruption check → carpark lookup) and returns a
-real itinerary: which bus from which stop, live ETAs, correct service
-numbers, destination terminals so it picks the right direction, and
-walking distances sanity-checked against actual coordinates. No more
-hallucinated bus 58 to "Tampines MRT" when bus 58 actually terminates at
-Bishan.
+The agent chains the eight tools (geocoding → reverse geocoding →
+stop search → live arrivals → direct/1-transfer bus ranking →
+disruption check → carpark lookup → one-shot location context) and
+returns a real itinerary: which bus from which stop, live ETAs,
+correct service numbers, destination terminals so it picks the right
+direction, and walking distances sanity-checked against actual
+coordinates. No more hallucinated bus 58 to "Tampines MRT" when bus 58
+actually terminates at Bishan.
 
 ### Why it exists
 
@@ -73,19 +74,21 @@ assistant orchestrate it end to end on your behalf.
 | **MCP SDK** | `mcp[cli]` |
 | **HTTP client** | `httpx` (async) |
 | **Transport** | stdio (default for Claude Desktop) |
-| **Data sources** | LTA DataMall, OneMap |
+| **Data sources** | LTA DataMall, OneMap, bundled MRT/LRT station catalog |
 | **Runtime deps** | 4 packages (`mcp[cli]`, `httpx`, `pydantic`, `python-dotenv`) |
 
-**Six tools registered:**
+**Eight tools registered:**
 
 | Tool | What it does |
 |---|---|
 | `resolve_location` | Geocode a place name / address / landmark → coordinates |
+| `reverse_geocode` | Coordinates → up to 3 nearby building names and full addresses |
 | `search_bus_stops` | Find stops by name, road, or proximity to coordinates |
 | `get_bus_arrivals` | Live bus ETAs, load, type, accessibility, **destination terminal** |
 | `find_bus_route` | Ranked **direct or 1-transfer bus** journeys between two coordinates (walk + wait + ride + transfer + ride + walk) |
 | `get_train_alerts` | MRT/LRT service disruptions, optionally filtered by line |
 | `get_carpark_availability` | Real-time carpark lots across HDB, URA, LTA |
+| `get_location_context` | One-shot summary of nearby bus stops, carparks, MRT/LRT stations, and line status for a coordinate |
 
 ---
 
@@ -301,7 +304,7 @@ any MCP-compatible client can drive it. Three common ways below.
 
 [Claude Code](https://claude.com/claude-code) is Anthropic's CLI agent.
 Register the server once, then every `claude` session in the project (or
-across projects, depending on scope) has the six tools available.
+across projects, depending on scope) has all eight tools available.
 
 **Option A — `.mcp.json` at your project root** (shareable with a team,
 safe to commit as long as you leave the env values as placeholders):
@@ -526,6 +529,22 @@ coordinates. If nothing matches, returns a clear "no results" message.
 
 ---
 
+### `reverse_geocode(latitude: float, longitude: float) -> str`
+
+The inverse of `resolve_location`: given coordinates (e.g. from a map
+pin, a GPS fix, or another tool's output), return nearby named
+buildings and addresses.
+
+**Example prompts:**
+- _"What's at 1.39142, 103.89515?"_
+- _"I dropped a pin at these coordinates — what's around it?"_
+
+**Returns** up to 3 nearby addresses with building name (where
+present), full address, and postal code. Coordinates outside Singapore
+are rejected with `ERR_COORDINATES_OUT_OF_BOUNDS`.
+
+---
+
 ### `search_bus_stops(query, latitude, longitude, radius_m=500, limit=10) -> str`
 
 Find bus stops by text match **or** by proximity to coordinates. Geo mode
@@ -609,6 +628,47 @@ count descending (text mode).
 
 ---
 
+### `get_location_context(latitude: float, longitude: float, radius_m=500) -> str`
+
+**One-shot "what's near here?"** Given Singapore coordinates and a
+search radius, returns an aggregated snapshot of nearby transport
+infrastructure so your agent doesn't have to chain four tool calls.
+
+For the given radius the tool returns, in a single response:
+
+- Up to **5 nearest bus stops** (code, name, road, walking distance).
+- Up to **5 nearest carparks** with at least 1 available car lot
+  (name, lots free, distance).
+- Up to **3 nearest MRT/LRT stations** with their codes, lines, and
+  distance — sourced from a bundled catalog of all 181 operational
+  stations across the 9 rail lines (NSL, EWL, CCL, DTL, TEL, NEL,
+  BPLRT, SKLRT, PGLRT).
+- **Current alert status** for each line among those nearby stations,
+  using the same LTA feed `get_train_alerts` reads.
+
+`radius_m` silently clamps at 5000m (5 km) to keep the scan bounded.
+If nothing is within radius, you get a clean
+"No transport infrastructure within <N>m …" message — not an error,
+not an empty body.
+
+**Example prompts:**
+- _"What's near Sengkang MRT?"_ (the agent resolves Sengkang first, then calls this)
+- _"I'm at 1.29349, 103.85583 — what are my travel options?"_
+- _"What's around Marina Bay Sands?"_
+
+**Graceful degradation**: if the MRT alerts feed is slow or
+unreachable, the `LINE STATUS` section degrades to a single
+`unavailable` line; the rest of the response still renders. The tool
+never fails outright because of alerts.
+
+**When to use vs. chaining:** prefer `get_location_context` over the
+manual chain of `search_bus_stops` + `get_carpark_availability` +
+`get_train_alerts` when the user's question is "what's near X?". It's
+one call, already scoped to the radius, and already joined against
+line alerts for you.
+
+---
+
 ## Use cases
 
 Patterns that work well in practice:
@@ -670,6 +730,17 @@ Single `get_train_alerts` call. If everything is normal you get a one-line
 confirmation; if anything is disrupted you get affected lines, stations,
 messages, and any free-bus bridging service.
 
+### 6. "What's near X?" in one call
+
+> What's near Sengkang MRT?
+
+The agent calls `resolve_location("Sengkang MRT")` → `get_location_context(lat, lng)`.
+Two calls, one complete answer: nearest bus stops, carparks with free
+lots, MRT/LRT stations, and current alert status for those lines — all
+joined and scoped to a single radius. The alternative (chaining
+`search_bus_stops` + `get_carpark_availability` + `get_train_alerts`
+yourself) is four tool calls and no cross-joining.
+
 ---
 
 ## Troubleshooting
@@ -705,7 +776,7 @@ them in memory for 24 hours. Subsequent calls are instant.
 - Check `~/Library/Logs/Claude/mcp-server-sg-mobility-mcp.log` (macOS) for
   startup errors.
 - Verify Claude Desktop sees the server: in a new chat, ask
-  _"What tools do you have from sg-mobility-mcp?"_ — Claude should list the six.
+  _"What tools do you have from sg-mobility-mcp?"_ — Claude should list all eight.
 - If Claude answers without calling any tool (e.g.
   _"I don't have real-time transport data"_), ask more directly:
   _"Please call the get_train_alerts tool."_
@@ -731,16 +802,23 @@ Small, flat, explicit — no framework, no database, no background workers.
   `exp` claim on receipt and refreshes 5 minutes before expiry, guarded by
   an `asyncio.Lock` so concurrent tool calls don't double-fetch.
 - **Caches** (`cache.py`):
-  - `bus_stops` list — warmed lazily on first `search_bus_stops` call or
-    first `get_bus_arrivals` call. Used for code → name resolution and
-    proximity search. 24h TTL.
+  - `bus_stops` list — warmed lazily on first `search_bus_stops`,
+    `get_bus_arrivals`, or `get_location_context` call. Used for
+    code → name resolution and proximity search. 24h TTL.
   - `routes_by_service` / `routes_by_stop` — warmed lazily on first
     `find_bus_route` call. Indexed two ways so both "what services pass
     this stop?" and "what's the stop sequence on this route?" are O(1).
     24h TTL.
-- **Fail-fast**: `server.py` validates all three env vars at import time.
-  Missing vars produce a clear error pointing back at this README, rather
-  than a cryptic failure on first tool call.
+- **Static MRT/LRT catalog** (`data/mrt_stations.json`): a hand-curated
+  JSON array of all 181 operational stations across the 9 rail lines,
+  loaded once at server import and held in memory. Enables
+  `get_location_context` (and future tools) to resolve "nearby
+  stations" without calling any upstream API. See `data/README.md` for
+  the schema and the quarterly-review process.
+- **Fail-fast**: `server.py` validates all three env vars and the MRT
+  station catalog at import time. Missing env vars or a malformed /
+  missing `data/mrt_stations.json` produce a clear error pointing back
+  at this README, rather than a cryptic failure on first tool call.
 - **Tool registration**: each `tools/*.py` file exports a
   `register_X_tools(mcp, *deps)` function. `server.py` calls each
   explicitly — no wildcard imports, no import-order fragility.
@@ -754,10 +832,15 @@ Be honest with users about what this server does not do:
 1. **`find_bus_route` supports direct and 1-transfer journeys.** Two or
    more bus transfers are not planned; if the best route needs multiple
    hops, the tool says so and you fall back to MRT.
-2. **No MRT routing.** The server does not plan MRT rides or transfers.
-   `get_train_alerts` only reports disruptions. When a trip needs MRT,
-   Claude fills in the route from general knowledge — which may be stale
-   (e.g. recent line openings).
+2. **No MRT routing.** The server does not plan MRT rides or
+   transfers. It _does_ know where the 181 operational MRT/LRT
+   stations are (via the bundled catalog) — enough for
+   `get_location_context` to surface "there's an MRT station X metres
+   away on lines Y, Z" — but it will not compute a train journey
+   between stations. When a trip needs MRT, the agent fills in the route
+   from general knowledge. The station catalog is reviewed quarterly
+   (see `data/README.md`); new stations opened since the last review
+   may be missing.
 3. **In-vehicle time, walking speed, and transfer wait are estimates.**
    `find_bus_route` uses a flat ~1.8 minutes per stop, 80 m/min walking,
    and a fixed 10-minute wait at any transfer point (we don't have
@@ -797,18 +880,23 @@ Be honest with users about what this server does not do:
 
 ```
 sg-mobility-mcp/
-├── server.py              ← entry point + tool registration + env fail-fast
+├── server.py              ← entry point + tool registration + env fail-fast + MRT catalog load
 ├── api/
 │   ├── __init__.py
 │   ├── lta.py             ← LTA DataMall client (paginated GET + typed methods)
 │   └── onemap.py          ← OneMap client with JWT auto-refresh + lock
 ├── tools/
 │   ├── __init__.py
+│   ├── _format.py         ← shared envelope / error-string helpers
 │   ├── bus.py             ← search_bus_stops, get_bus_arrivals
 │   ├── train.py           ← get_train_alerts
 │   ├── carpark.py         ← get_carpark_availability
-│   ├── location.py        ← resolve_location
-│   └── routing.py         ← find_bus_route
+│   ├── location.py        ← resolve_location, reverse_geocode
+│   ├── routing.py         ← find_bus_route
+│   └── context.py         ← get_location_context (aggregation)
+├── data/
+│   ├── mrt_stations.json  ← hand-curated MRT/LRT station catalog (loaded at startup)
+│   └── README.md          ← schema, update sources, quarterly-review process
 ├── cache.py               ← lazy-warmed bus stops + bus routes (24h TTL each)
 ├── requirements.txt
 ├── .env.example           ← template with placeholders (safe to commit)
@@ -832,9 +920,21 @@ sg-mobility-mcp/
   their current format.
 - **Adding a new tool.** Create a new file under `tools/` with a
   `register_*_tools(mcp, ...)` function. Register it in `server.py`. Follow
-  the existing pattern: return a formatted string, catch `RuntimeError`
-  and convert to a user-facing message, do not let raw exceptions reach
-  the MCP layer.
+  the existing pattern: return a formatted string via the helpers in
+  `tools/_format.py`, catch upstream exceptions and convert to a
+  user-facing `ERR_*` message, do not let raw exceptions reach the MCP
+  layer.
+- **MRT/LRT station catalog.** `data/mrt_stations.json` is a static,
+  hand-curated file loaded once at startup. When a new station opens
+  (roughly every 18–24 months — e.g. TEL5, JRL, CRL extensions):
+  1. Add the entry to `data/mrt_stations.json`. Schema and sources are
+     documented in `data/README.md`.
+  2. Commit the change and restart the server. The file is only read at
+     import time; a running server will not pick up new stations.
+
+  There is no automated refresh pipeline by design — the static-file
+  approach keeps startup network-independent and the catalog
+  audit-friendly.
 
 ---
 
