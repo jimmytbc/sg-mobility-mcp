@@ -40,3 +40,13 @@ class OneMapTimeout(UpstreamError):
 
 class OneMapSchemaDrift(UpstreamError):
     pass
+
+
+class OneMapRoutingServiceDown(UpstreamError):
+    """OneMap PT routing returned 5xx. Per FR-7.4 / FR-E.16 triggers
+    immediate fallback — no retry on 5xx."""
+
+
+class OneMapRoutingRateLimited(UpstreamError):
+    """OneMap PT routing returned 429 and the backoff budget was
+    exhausted. Per FR-7.4 / FR-E.17 triggers fallback."""

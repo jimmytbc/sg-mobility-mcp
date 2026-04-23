@@ -5,6 +5,92 @@ follow [Semantic Versioning](https://semver.org). Per
 [`specs/00-rules.md`](specs/00-rules.md) R9, schema changes within a
 major version are additive only.
 
+## [0.2.0 — Phase 5 amendment] — 2026-04-23
+
+The v0.2 cycle was reopened after the tagged v0.2-phase-4 release: a
+user-driven test of `find_route(Tampines Ave 10 → Far East Flora
+Thomson)` surfaced that the Phase 4 MRT-suggestion pattern (bounded
+by an 800 m both-endpoints gate, suggestion-only, no time estimate)
+suppressed the rail-inclusive option that would have been the fastest
+itinerary. Phase 5 replaces `find_route`'s internal composition with
+a thin orchestrator over OneMap's Public Transport routing endpoint.
+
+### Changed
+
+- **`find_route` REPLACED** — now calls OneMap's `routeType=pt`
+  endpoint and returns up to 3 time-ranked itineraries mixing
+  **walking, bus, and MRT/LRT** in a single call. Each itinerary
+  surfaces total duration, fare (SGD, sourced from OneMap), transfer
+  count, and per-leg detail (mode / duration / identifier /
+  from-stop → to-stop). Per-leg intermediate-stop output uses the
+  lean policy from FR-7.3 (count + first and last intermediate stop
+  names only) to stay under the 16 KB payload ceiling.
+- **`find_bus_route` deregistered from the MCP surface** per FR-7.8.
+  The underlying 2-transfer routing function `find_bus_route_impl`
+  is retained in `tools/routing.py` and invoked internally as
+  `find_route`'s fallback path.
+- **Fallback chain on OneMap failure** per FR-7.4: 5xx responses
+  trigger immediate fallback (no retry on 5xx); 429 triggers the
+  LTA-style backoff helper first, then fallback on backoff
+  exhaustion; 200-with-zero-itineraries and 404 ("No route found"
+  from OneMap) trigger immediate fallback with `ERR_NO_PT_ROUTE`.
+  Each failure mode emits a distinct `Note:` footer string so the
+  agent can narrate the condition to the user; terminal (`_TERMINAL`)
+  variants replace the body with an `ERR_*` prefix when the fallback
+  also fails.
+- **Tool surface count**: 9 → 8 registered tools. `find_bus_route`
+  no longer appears in the MCP tool listing.
+
+### Added
+
+- Seven new strings in `specs/05-ui.md` §5.4: `LABEL_ITINERARY`,
+  `WARN_WALK_LIMIT_EXCEEDED`, `ERR_NO_PT_ROUTE`,
+  `ERR_ROUTING_SERVICE_DOWN`, `ERR_ROUTING_SERVICE_DOWN_TERMINAL`,
+  `ERR_ROUTING_RATE_LIMITED`, `ERR_ROUTING_RATE_LIMITED_TERMINAL`.
+- Four new error-handling FRs: `FR-E.15` (no PT route),
+  `FR-E.16` (routing service 5xx), `FR-E.17` (routing rate limit),
+  `FR-E.18` (walk-limit-exceeded warning).
+- `tools/_pt_routing.py` — OneMap PT response parser and A1-envelope
+  formatter.
+- `api/onemap.py::route_pt` — OneMap routing call wrapper with LTA-
+  style 429 backoff (reuses `RATE_LIMIT_BACKOFFS_S` tuple per FR-7.5;
+  no new backoff code per R2).
+
+### Removed
+
+- Defunct Phase 4 constants from `tools/discovery.py`:
+  `MRT_SUGGESTION_RADIUS_M`, `LONG_DISTANCE_SHORTCIRCUIT_M`,
+  `WALK_M_PER_MIN`, `WALK_MAX_MIN`.
+- Superseded strings are still present in `specs/05-ui.md` §5.4 and
+  `tools/_format.py` (`MSG_MRT_SUGGESTION`, `MSG_NO_WALK_LONG`,
+  `LABEL_OPTION_BUS`, `LABEL_OPTION_WALK`, `LABEL_OPTION_MRT`) for
+  traceability with v0.2 commits, but they are NOT emitted by Phase 5
+  code.
+
+### Calibration
+
+`MAX_WALK_DISTANCE_M` = **1000 m**. Selected from a 5-pair calibration
+sweep (Tampines → Far East Flora; Sengkang → Outram; NTU → Boon Lay;
+Changi Airport T3 → Marina Bay Sands; Changi Pt Ferry Terminal →
+Bishan) at 1000 / 1500 / 2000 / 2500 m. All routeable pairs returned
+the same 3 itineraries at every tested radius with no
+`walkLimitExceeded` flag; 1000 m is the lowest value that remains
+sensible.
+
+### Phase tags
+
+- `v0.2-phase-5` — `find_route` REPLACE with OneMap PT thin
+  orchestrator; `find_bus_route` deregistered from MCP surface.
+
+### Compatibility
+
+Behaviour-changing: agents that previously called `find_bus_route`
+directly no longer find it on the MCP surface and must call
+`find_route` instead. Per `specs/00-rules.md` R9 this is a schema-
+breaking change for that one tool; the product-owner decision to
+proceed was logged in the Phase 5 CONFIRMED ASSUMPTIONS (Q1). All
+other tools remain backward-compatible.
+
 ## [0.2.0] — 2026-04-22
 
 An enhancement cycle over v0.1.0. Closes specific functionality gaps

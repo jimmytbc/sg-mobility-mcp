@@ -38,6 +38,9 @@ ERR_BUS_STOP_NOT_FOUND = "ERR_BUS_STOP_NOT_FOUND"
 ERR_LOCATION_NOT_FOUND = "ERR_LOCATION_NOT_FOUND"
 ERR_INVALID_LINE_CODE = "ERR_INVALID_LINE_CODE"
 ERR_NO_BUS_ROUTE = "ERR_NO_BUS_ROUTE"
+ERR_NO_PT_ROUTE = "ERR_NO_PT_ROUTE"
+ERR_ROUTING_SERVICE_DOWN = "ERR_ROUTING_SERVICE_DOWN"
+ERR_ROUTING_RATE_LIMITED = "ERR_ROUTING_RATE_LIMITED"
 
 MSG_ERR_ONEMAP_AUTH_FAILED = (
     "OneMap rejected the configured credentials. Verify ONEMAP_EMAIL "
@@ -127,6 +130,33 @@ MSG_MRT_SUGGESTION = (
     "this is a suggestion; route the trains using your own knowledge."
 )
 MSG_NO_WALK_LONG = "walking option not shown (>25 min direct walk)."
+
+# Phase 5 — find_route multimodal (specs/05-ui.md §5.4).
+# Note: the pre-formatted "Note: ..." copy in the spec table is stored
+# here without the "Note: " prefix so footer() can add it uniformly.
+MSG_ERR_NO_PT_ROUTE = "No public transport route exists between these points."
+MSG_ROUTING_SERVICE_DOWN = (
+    "Routing service unavailable. Showing bus-only options."
+)
+MSG_ROUTING_SERVICE_DOWN_TERMINAL = (
+    "Routing service unavailable. Try again later."
+)
+MSG_ROUTING_RATE_LIMITED = "Routing service busy. Showing bus-only options."
+MSG_ROUTING_RATE_LIMITED_TERMINAL = (
+    "Routing service busy. Try again in a minute."
+)
+MSG_WALK_LIMIT_EXCEEDED = "This route requires more walking than usual."
+
+
+def label_itinerary(
+    n: int, duration_min: int, fare: str, transfer_count: int
+) -> str:
+    """LABEL_ITINERARY per specs/05-ui.md §5.4.
+
+    Singular "transfer" when count == 1 per §5.2 itinerary-header rule.
+    """
+    word = "transfer" if transfer_count == 1 else "transfers"
+    return f"Itinerary {n} — {duration_min} min · ${fare} · {transfer_count} {word}"
 
 
 # ---------------------------------------------------------------------------

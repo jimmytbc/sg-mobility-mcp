@@ -17,16 +17,26 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import sys
 import time
+from datetime import datetime
 
 import httpx
 
-from api.errors import OneMapAuthFailed, OneMapSchemaDrift, OneMapTimeout
+from api.errors import (
+    OneMapAuthFailed,
+    OneMapRoutingRateLimited,
+    OneMapRoutingServiceDown,
+    OneMapSchemaDrift,
+    OneMapTimeout,
+)
+from api.lta import RATE_LIMIT_BACKOFFS_S
 
 BASE_URL = "https://www.onemap.gov.sg/api"
 TOKEN_URL = f"{BASE_URL}/auth/post/getToken"
 SEARCH_URL = f"{BASE_URL}/common/elastic/search"
 REVGEOCODE_URL = f"{BASE_URL}/public/revgeocode"
+ROUTE_URL = f"{BASE_URL}/public/routingsvc/route"
 TOKEN_REFRESH_BUFFER_S = 300
 
 EXPECTED_REVGEOCODE_KEYS = (
@@ -174,3 +184,86 @@ class OneMapClient:
                 "OneMap reverse geocode: GeocodeInfo entry missing expected keys"
             )
         return geocode_info[:3]
+
+    async def route_pt(
+        self,
+        from_lat: float,
+        from_lng: float,
+        to_lat: float,
+        to_lng: float,
+        max_walk_distance_m: int,
+        num_itineraries: int = 3,
+        now: datetime | None = None,
+    ) -> dict:
+        """Call OneMap PT routing endpoint (FR-7.1).
+
+        5xx raises OneMapRoutingServiceDown (no retry per FR-E.16).
+        429 is retried with the LTA backoff schedule per FR-7.5; when
+        exhausted, raises OneMapRoutingRateLimited per FR-E.17.
+        """
+        token = await self._get_token()
+        call_time = now or datetime.now()
+        params = {
+            "start": f"{from_lat},{from_lng}",
+            "end": f"{to_lat},{to_lng}",
+            "routeType": "pt",
+            "mode": "TRANSIT",
+            "date": call_time.strftime("%m-%d-%Y"),
+            "time": call_time.strftime("%H:%M:%S"),
+            "maxWalkDistance": max_walk_distance_m,
+            "numItineraries": num_itineraries,
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        attempt = 0
+        while True:
+            try:
+                res = await self._client.get(
+                    ROUTE_URL, params=params, headers=headers
+                )
+            except httpx.TimeoutException as exc:
+                raise OneMapTimeout("OneMap PT routing timed out") from exc
+            except httpx.RequestError as exc:
+                raise OneMapTimeout(
+                    f"OneMap PT routing request failed: {exc}"
+                ) from exc
+
+            if res.status_code == 200:
+                try:
+                    return res.json()
+                except ValueError as exc:
+                    raise OneMapSchemaDrift(
+                        "OneMap PT routing: non-JSON body"
+                    ) from exc
+            # OneMap returns 404 with `{"error": "No route found ..."}`
+            # for genuinely unrouteable endpoints (e.g., airport-side
+            # service roads). The spec (FR-E.15) anticipated a 200 with
+            # zero itineraries; live behaviour is 404. Normalise to the
+            # empty-itinerary shape so the caller's zero-itinerary
+            # branch triggers the FR-7.4 fallback + ERR_NO_PT_ROUTE.
+            if res.status_code == 404:
+                return {"plan": {"itineraries": []}}
+            if res.status_code == 429:
+                if attempt < len(RATE_LIMIT_BACKOFFS_S):
+                    delay = RATE_LIMIT_BACKOFFS_S[attempt]
+                    print(
+                        f"[onemap] 429 on PT routing; backing off {delay}s "
+                        f"(attempt {attempt + 1}/{len(RATE_LIMIT_BACKOFFS_S)})",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                raise OneMapRoutingRateLimited(
+                    "OneMap PT routing rate-limited after retries"
+                )
+            if res.status_code in (401, 403):
+                raise OneMapAuthFailed(
+                    f"OneMap PT routing auth rejected ({res.status_code})"
+                )
+            if 500 <= res.status_code < 600:
+                raise OneMapRoutingServiceDown(
+                    f"OneMap PT routing returned {res.status_code}"
+                )
+            raise OneMapTimeout(
+                f"OneMap PT routing returned {res.status_code}"
+            )

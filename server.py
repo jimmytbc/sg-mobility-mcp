@@ -24,7 +24,6 @@ from tools.carpark import register_carpark_tools
 from tools.context import register_context_tools
 from tools.discovery import register_discovery_tools
 from tools.location import register_location_tools
-from tools.routing import register_routing_tools
 from tools.train import register_train_tools
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -89,9 +88,11 @@ register_location_tools(mcp, onemap)
 register_bus_tools(mcp, lta, cache)
 register_train_tools(mcp, lta)
 register_carpark_tools(mcp, lta)
-register_routing_tools(mcp, lta, cache)
+# find_bus_route is deregistered from the MCP surface per FR-7.8.
+# find_bus_route_impl remains in tools/routing.py as find_route's
+# fallback path per FR-7.4.
 register_context_tools(mcp, lta, cache, mrt_stations)
-register_discovery_tools(mcp, lta, cache, mrt_stations)
+register_discovery_tools(mcp, lta, cache, onemap)
 
 
 if __name__ == "__main__":

@@ -14,22 +14,24 @@ Plug it into your agent and say things like:
 > hospital visit at Napier Road at 2:30, and a class in Marine Parade at
 > 4. Plan my public-transport day."_
 
-The agent chains the nine tools (geocoding → reverse geocoding →
-stop search → live arrivals → direct / 1-transfer / 2-transfer bus
-ranking → disruption check → carpark lookup → one-shot location
-context → unified "best route A to B" discovery) and returns a real
-itinerary: which bus from which stop, live ETAs, correct service
-numbers, destination terminals so it picks the right direction, and
-walking distances sanity-checked against actual coordinates. No more
-hallucinated bus 58 to "Tampines MRT" when bus 58 actually terminates
-at Bishan.
+The agent chains the eight tools (geocoding → reverse geocoding →
+stop search → live arrivals → disruption check → carpark lookup →
+one-shot location context → multimodal "best route A to B"
+routing) and returns a real itinerary: walking + bus + MRT/LRT legs
+with per-leg duration, fare, transfer count, live ETAs, correct
+service numbers, destination terminals so it picks the right
+direction, and walking distances sanity-checked against actual
+coordinates. No more hallucinated bus 58 to "Tampines MRT" when
+bus 58 actually terminates at Bishan.
 
 **v0.2 additions over v0.1.0:** standardized output envelope across
 all tools, `reverse_geocode` (coordinates → addresses),
 `get_location_context` (one-shot "what's near here?"), 2-transfer bus
-routing with cost-promising enumeration, `find_route` (unified bus +
-walking + MRT-hint dispatcher), LTA 429 backoff, and cache concurrency
-locks. See [`CHANGELOG.md`](CHANGELOG.md) for the full cycle summary.
+routing with cost-promising enumeration (internal, used as
+`find_route`'s fallback path), `find_route` (multimodal public
+transport routing via OneMap — walking + bus + MRT/LRT legs in time-
+ranked itineraries), LTA 429 backoff, and cache concurrency locks.
+See [`CHANGELOG.md`](CHANGELOG.md) for the full cycle summary.
 
 ### Why it exists
 
@@ -85,7 +87,7 @@ assistant orchestrate it end to end on your behalf.
 | **Data sources** | LTA DataMall, OneMap, bundled MRT/LRT station catalog |
 | **Runtime deps** | 4 packages (`mcp[cli]`, `httpx`, `pydantic`, `python-dotenv`) |
 
-**Nine tools registered:**
+**Eight tools registered:**
 
 | Tool | What it does |
 |---|---|
@@ -93,11 +95,14 @@ assistant orchestrate it end to end on your behalf.
 | `reverse_geocode` | Coordinates → up to 3 nearby building names and full addresses |
 | `search_bus_stops` | Find stops by name, road, or proximity to coordinates |
 | `get_bus_arrivals` | Live bus ETAs, load, type, accessibility, **destination terminal** |
-| `find_bus_route` | Ranked **direct, 1-transfer, or 2-transfer bus** journeys between two coordinates (walk + wait + ride + transfer + ride + walk), scored server-side |
 | `get_train_alerts` | MRT/LRT service disruptions, optionally filtered by line |
 | `get_carpark_availability` | Real-time carpark lots across HDB, URA, LTA |
 | `get_location_context` | One-shot summary of nearby bus stops, carparks, MRT/LRT stations, and line status for a coordinate |
-| `find_route` | Unified "best route A → B" dispatcher: ranks bus options (via `find_bus_route`) + walking estimate + MRT-suggestion hint in a single call |
+| `find_route` | Multimodal "best route A → B" routing via OneMap PT. Returns up to 3 time-ranked itineraries mixing walking, bus, and MRT/LRT, with per-leg duration, fare, transfer count. Falls back to bus-only (2-transfer search) if OneMap is unavailable. |
+
+> 2-transfer bus routing still exists as `find_bus_route_impl` inside
+> `tools/routing.py`, but it is no longer a registered MCP tool — it
+> is reachable only as `find_route`'s fallback path per FR-7.4.
 
 ---
 
@@ -580,13 +585,29 @@ with ETA, GPS/scheduled indicator, load, bus type, wheelchair access, and
 
 ---
 
-### `find_bus_route(from_latitude, from_longitude, to_latitude, to_longitude, max_walk_m=600, max_transfer_walk_m=200, max_total_min=120, limit=3) -> str`
+### `find_bus_route` — deregistered in Phase 5
 
-**The recommended tool for trip planning.** Given origin and destination
-coordinates, this tool finds the best bus journeys — **direct,
-1-transfer, or 2-transfer** — scored server-side by total time. It
-evaluates every candidate origin and destination stop within
-`max_walk_m`, looks for:
+As of `v0.2-phase-5` the standalone bus-only routing tool is no longer
+registered on the MCP surface. The underlying 2-transfer search
+(`find_bus_route_impl`) is retained in `tools/routing.py` and is
+invoked automatically as `find_route`'s fallback path whenever OneMap
+PT routing is unavailable (5xx, rate-limit exhaustion, or a pair with
+no public transport route).
+
+Agents that previously called `find_bus_route` directly should call
+`find_route` instead — it returns multimodal itineraries that include
+bus legs wherever OneMap ranks them competitively, and it falls back
+to bus-only output when needed.
+
+The legacy documentation below describes the internal function's
+behaviour for completeness.
+
+#### Internal: `find_bus_route_impl(from_latitude, from_longitude, to_latitude, to_longitude, max_walk_m=600, max_transfer_walk_m=200, max_total_min=120, limit=3) -> str`
+
+Given origin and destination coordinates, this finds the best bus
+journeys — **direct, 1-transfer, or 2-transfer** — scored server-side
+by total time. It evaluates every candidate origin and destination
+stop within `max_walk_m`, looks for:
 
 - **Direct** services that serve both origin and destination stops in
   the correct direction.
@@ -708,60 +729,50 @@ line alerts for you.
 
 ---
 
-### `find_route(from_latitude, from_longitude, to_latitude, to_longitude) -> str`
+### `find_route(from_latitude, from_longitude, to_latitude, to_longitude, origin=None, destination=None) -> str`
 
-**Unified "best route from A to B" dispatcher.** Given an origin and a
-destination coordinate, returns a single ranked list combining bus
-options, a straight-line walking estimate, and an MRT-suggestion hint —
-without the agent having to chain `find_bus_route` + walking calc + MRT
-lookup itself.
+**Multimodal "best route from A to B" routing.** Thin orchestrator over
+OneMap's Public Transport routing endpoint. Returns up to 3 time-ranked
+itineraries mixing **walking, bus, and MRT/LRT** legs in a single call.
 
-In one response, you get:
+Each itinerary includes:
 
-- **Bus options** — the top-ranked journeys from `find_bus_route` (up to
-  2 transfers), relabelled `OPTION N — BUS — M min total` and sorted by
-  estimated time. The per-leg body is delegated unchanged, so stop codes,
-  live ETAs, and per-leg timings match what `find_bus_route` would have
-  produced on its own.
-- **Walking option** — included when the straight-line walk is under 25
-  minutes (at the 80 m/min v0.1.0 assumption), formatted
-  `OPTION N — WALK — M min (D km)`. Omitted otherwise with a footer
-  noting the omission. As a fallback, walking is included anyway when
-  no bus and no MRT option exists.
-- **MRT suggestion** — if both endpoints are within 800 m of an MRT or
-  LRT station (per the Phase 2 catalog), the output includes an
-  `OPTION N — MRT SUGGESTION` block naming the board and alight
-  candidates, their codes, lines, and walk distances. This is a hint,
-  not a routed plan — `find_route` does not compute MRT travel time or
-  the transfer interchange (the agent fills those in from general
-  knowledge, per R10). The hint also covers LRT: Sengkang, Punggol, and
-  Bukit Panjang LRT stations are surfaced the same way.
+- **Total duration**, **total fare** (SGD, sourced from OneMap), and
+  **transfer count**.
+- **Per-leg detail**: mode (`WALK` / `BUS` / `SUBWAY`), duration, and
+  the from-stop → to-stop pair. WALK legs include the metric distance;
+  BUS legs show the service number (e.g., `199`); SUBWAY legs show the
+  line code (e.g., `NE` for North East Line).
+- **Lean intermediate-stop summary** on transit legs: count plus the
+  first and last intermediate stop names. The full stop list is
+  intentionally omitted — look up any specific stop via
+  `get_bus_arrivals` if needed.
 
-**Ranking**: bus and walking options are sorted ascending by estimated
-total time. The MRT suggestion has no time estimate and appears last.
+**Ranking**: itineraries are returned in the order OneMap emits them
+(already sorted by estimated total time). The summary line names the
+fastest duration and the cheapest fare across the returned set.
 
-**Long-distance short-circuit**: if the straight-line distance exceeds
-~25 km (cross-island extreme), `find_route` skips the bus enumeration
-entirely and returns just the MRT suggestion + walking fallback. This
-keeps per-call latency bounded for the worst-case pairs and is the
-prescribed fallback for RISK-11.
+**Fallback path**: when OneMap returns 5xx (service down), 429 after
+exhausting the retry budget, or zero itineraries (no PT route exists),
+`find_route` falls back to the internal 2-transfer bus search
+(`find_bus_route_impl`) and wraps the bus-only result with a `Note:`
+footer explaining which routing condition triggered the fallback. If
+the fallback also fails, the tool returns a terminal `ERR_*` prefix.
 
-**Latency**: under 7 s at the 95th percentile for typical Singapore
-pairs after cache warm. First call may take longer due to cache warm
-(surfaced via the same `MSG_FIRST_CALL_WARM` footer as `find_bus_route`).
+**Place-name handling**: pass `origin` and `destination` strings to
+have the envelope header display the user's place names verbatim.
+When omitted, the header falls back to the formatted coordinate pair.
 
 **Example prompts:**
 - _"Best route from Compass One to Outram Park?"_
-- _"How do I get from Tuas Link to Changi Airport?"_ (triggers the
-  long-distance short-circuit)
-- _"Best way from Sengkang to Vivocity?"_
+- _"How do I get from Tampines to Macpherson?"_
+- _"What's the fastest way from NTU to Raffles Place?"_
 
-**When to use vs. chaining:** this is the recommended starting point for
-"best route from A to B" questions. Prefer `find_route` over chaining
-`find_bus_route` + walking calc + MRT lookup manually.
-`get_train_alerts` is a deliberate separate call — `find_route` never
-calls it, so the agent must call `get_train_alerts` or
-`get_location_context` separately if alert awareness is needed.
+**When to use vs. chaining:** this is the recommended starting point
+for "best route from A to B" questions — no need to chain bus or train
+tools. `get_train_alerts` is a deliberate separate call; `find_route`
+never calls it so the agent must query alerts separately if needed
+(live arrivals on a specific bus stop remain `get_bus_arrivals`'s job).
 
 ---
 
@@ -781,20 +792,22 @@ Claude calls `resolve_location` → `search_bus_stops` (geo) →
 > What's the fastest route from Compass One to Outram Park?
 
 Claude calls `resolve_location` twice then `find_route`. The tool
-composes bus options (direct, 1-transfer, or 2-transfer via
-`find_bus_route`), a straight-line walking estimate when the pair is
-close, and an MRT-suggestion hint when both endpoints are within 800 m
-of a station — all ranked and returned in one call.
+calls OneMap's multimodal PT routing and returns up to 3 time-ranked
+itineraries mixing walking, bus, and MRT/LRT legs — per-leg duration,
+fare, transfer count, all in a single response.
 
-Prefer `find_route` as the entry point for "best route A → B" queries.
-Use `find_bus_route` directly only when you need the raw bus-only
-ranking (e.g., explicit walk-radius or max-time overrides, or debugging).
+This is the entry point for "best route A → B" queries. Chaining is
+no longer necessary: `find_route` covers bus + MRT/LRT + walking in
+one call.
 
-For cross-island pairs like **Sengkang → Tuas Link** where no good
-direct or single-transfer option exists, `find_route` (via
-`find_bus_route`) will surface 2-transfer options labelled
-`OPTION N — BUS (2-TRANSFER) — M min total`, complete with the two
-transfer blocks. This is v0.2's key routing upgrade over v0.1.0.
+When OneMap is unavailable (5xx, rate-limit exhaustion) or no PT
+route exists between the endpoints, `find_route` automatically falls
+back to bus-only search (direct / 1-transfer / 2-transfer via the
+internal `find_bus_route_impl`) and surfaces a `Note:` footer naming
+the condition. Cross-island pairs like **Sengkang → Tuas Link** that
+previously relied on v0.2-phase-3's 2-transfer search still work —
+OneMap usually finds a rail-inclusive itinerary; the 2-transfer
+bus-only fallback remains available when needed.
 
 ### 3. Find parking near a destination
 
@@ -817,17 +830,12 @@ appointments and let it plan the whole day:
 Behind the scenes your agent will:
 
 1. `resolve_location` each venue (5–6 calls) to get coordinates.
-2. `find_bus_route` for each leg — the server does the walk + wait +
-   ride scoring so the agent gets a ranked answer, not a bus number to
-   guess between.
-3. Fall back to MRT when `find_bus_route` returns nothing (or every
-   option exceeds the 120-min cap for 2-transfer journeys, or
-   90-min for direct/1-transfer) — your agent fills in train legs
-   from general knowledge, knowing the bus options were genuinely
-   checked.
-4. Optionally `get_train_alerts` to check for disruptions before
+2. `find_route` for each leg — OneMap PT returns multimodal
+   itineraries (walk + bus + MRT/LRT), already time-ranked, with
+   per-leg duration, fare, and transfer count. No per-mode chaining.
+3. Optionally `get_train_alerts` to check for disruptions before
    committing to an MRT-heavy itinerary.
-5. Assemble a timed plan with leave-by times and buffers.
+4. Assemble a timed plan with leave-by times and buffers.
 
 This is the workload this server was built for.
 
@@ -938,34 +946,29 @@ Small, flat, explicit — no framework, no database, no background workers.
 
 Be honest with users about what this server does not do:
 
-1. **`find_bus_route` supports up to 2 bus transfers (3 buses).**
-   Three or more transfers are not planned; if the best route needs
-   more hops, the tool returns `ERR_NO_BUS_ROUTE` and you fall back
-   to MRT. The 2-transfer search is bounded by a 500-candidate
-   evaluation cap — for cross-island pairs you may see a "best-found-
-   so-far" note rather than a guaranteed-optimal result.
-2. **No MRT routing.** The server does not plan MRT rides or
-   transfers. It _does_ know where the 181 operational MRT/LRT
-   stations are (via the bundled catalog) — enough for
-   `get_location_context` to surface "there's an MRT station X metres
-   away on lines Y, Z" and for `find_route` to emit a board/alight
-   candidate hint when both endpoints are within 800 m of a station
-   — but it will not compute a train journey between stations.
-   `find_route` explicitly does not return MRT travel time or a
-   computed interchange station. When a trip needs MRT, the agent
-   fills in the route from general knowledge. The station catalog is
-   reviewed quarterly (see `data/README.md`); new stations opened
-   since the last review may be missing.
-3. **In-vehicle time, walking speed, and transfer wait are estimates.**
-   `find_bus_route` uses a flat ~1.8 minutes per stop, 80 m/min walking,
-   and a fixed 10-minute wait at any transfer point (we don't have
-   scheduled intervals). Real bus rides vary with traffic,
-   express-vs-local service patterns, and time of day.
-4. **No walking-directions planner.** `find_route` includes a
-   straight-line walking estimate (distance / 80 m/min) as a ranked
-   option when it's under 25 minutes, and `find_bus_route` short-
-   circuits with a "walk is faster" note for very short pairs. Neither
-   computes turn-by-turn walking directions.
+1. **`find_route` is schedule-based, not live.** OneMap's PT routing
+   returns itineraries computed against the published schedule; it
+   does not consult LTA's live bus arrivals. Per-leg durations can
+   differ from what the user actually experiences (especially during
+   bus-service disruption or peak-hour traffic). Live ETAs remain
+   available via `get_bus_arrivals` for any specific stop.
+2. **Bus-only fallback is bounded.** When OneMap is unavailable,
+   `find_route` falls back to the internal 2-transfer bus search
+   (`find_bus_route_impl`). Three-or-more-transfer journeys are not
+   planned on the fallback path; if the best bus-only route needs
+   more hops, the tool returns no route and surfaces the appropriate
+   terminal error string.
+3. **In-vehicle time, walking speed, and transfer wait on the fallback
+   path are estimates.** `find_bus_route_impl` uses a flat
+   ~1.8 minutes per stop, 80 m/min walking, and a fixed 10-minute wait
+   at any transfer point (we don't have scheduled intervals for bus-
+   only fallback output). Real bus rides vary with traffic,
+   express-vs-local service patterns, and time of day. OneMap-sourced
+   itineraries on the primary path use the published schedule and are
+   not subject to these estimates.
+4. **No walking-directions planner.** `find_route` surfaces WALK legs
+   (distance and duration) as part of itineraries, but does not
+   compute turn-by-turn walking directions.
 5. **Carpark data comes from LTA's feed** — not every carpark in Singapore
    is included (e.g. some private ones).
 6. **Singapore only.** The data sources are Singapore-specific; this
