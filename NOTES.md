@@ -4,6 +4,13 @@ Adjacent improvements noticed during v0.2 delivery but deliberately
 not implemented in scope. Logged per `specs/00-rules.md` R7 for
 product-owner triage. Each entry is a candidate — not a commitment.
 
+## Phase 5 resolution summary (2026-04-23)
+
+Four of the items below were rendered moot or directly resolved by
+the v0.2-phase-5 `find_route` REPLACE (OneMap PT thin orchestrator).
+Marked inline under each affected section. Items 1, 2, 4, 5 remain
+open for v0.3 triage.
+
 ---
 
 ## OneMap: resolve_location returns tenant shops for multi-tenant buildings
@@ -28,43 +35,36 @@ but the top-1 heuristic is fragile for multi-tenant buildings.
 
 *Observed 2026-04-22 across two sessions.*
 
-`find_bus_route` suggested Tampines → Punggol → MBS via bus 118 +
-City Direct 666/673. The services are real per LTA, and the
-transfer geography is valid — but City Direct buses run only on
-weekday peak hours, which the flat 10-min transfer-wait estimate
-wildly misrepresents off-peak. Same class of issue surfaces with
-feeders (short-range, many-stop loops designed for HDB-to-MRT, not
-cross-island travel) that can win the scoring because 1.8 min/stop
-treats all stops equally.
+**Scope narrowed by Phase 5.** OneMap's PT routing uses the published
+schedule, so the misrepresentation is resolved on the primary
+`find_route` path — City Direct / peak-only services won't be
+suggested off-peak. The issue remains for the bus-only fallback
+(`find_bus_route_impl`), which still uses the flat 10-min transfer
+wait and 1.8 min/stop heuristic.
 
 - **Fix shape**: add a third cache keyed by `ServiceNo` from LTA's
   `/BusServices` endpoint (`Category`: TRUNK / FEEDER / EXPRESS /
   CITY_DIRECT / INDUSTRIAL / NIGHT_RIDER / ...). In
-  `find_bus_route` scoring: either filter non-TRUNK services or
-  apply a category-based penalty.
+  `find_bus_route_impl` scoring: either filter non-TRUNK services
+  or apply a category-based penalty.
 - **Effort**: ~1–2 hours. Touches `api/lta.py`, `cache.py`,
-  `tools/routing.py`. Natural to fold into Phase 3, which already
-  edits scoring.
+  `tools/routing.py`. Lower priority than before since it only
+  affects the fallback path.
 
 ---
 
 ## "Feeder to MRT station X" as a first-class query
 
-*Observed 2026-04-22.*
+*Observed 2026-04-22.* **Resolved by Phase 5.**
 
-Confirming that bus 454 is a Tampines feeder to Tampines West MRT
-required 5 tool calls: resolve origin → search stops near origin →
-arrivals at origin stop → resolve MRT → search stops near MRT →
-arrivals at MRT stop → manual cross-reference. The common case
-("which feeder gets me from here to the nearest MRT?") deserves a
-direct tool.
-
-- **Fix shape A**: new `find_feeder_bus(latitude, longitude,
-  station_code) -> str` tool. Simpler, Singapore-idiomatic.
-- **Fix shape B**: `via_stop` parameter on `find_bus_route` that
-  constrains the route through a named stop. More general, but
-  scoring becomes conditional.
-- **Effort**: A ≈ 2 hours; B ≈ half-day.
+The common case ("which feeder gets me from here to the nearest
+MRT?") is now a single `find_route` call — OneMap PT returns
+multimodal itineraries that chain feeder-bus WALK + BUS legs into
+a SUBWAY leg automatically, with schedule-based durations and the
+actual station codes in the response. Whether the agent asks "how
+do I get from X to Y?" or "what's the feeder to Tampines West?",
+the tool covers both shapes. No dedicated `find_feeder_bus` tool
+is needed.
 
 ---
 
@@ -116,49 +116,29 @@ correctly given its inputs; the geocoder is the weak link.
 
 ## find_route MRT suggestion limited to single nearest station
 
-*Observed 2026-04-22 during Phase 4 verification.*
+*Observed 2026-04-22 during Phase 4 verification.* **Obsolete after
+Phase 5.**
 
-`find_route` emits one `Board candidate` and one `Alight candidate`
-— the station nearest each endpoint within 800m. If the geocoded
-coordinates are slightly off (see bare-HDB-block issue above), or
-if a slightly-further station would give a better line match (e.g.,
-origin has two stations at 600m and 700m on different lines, one
-shared with the destination's station), the tool picks geographic
-nearest rather than route-optimal. An agent cannot recover what the
-tool didn't surface.
-
-- **Fix shape**: emit up to 3 candidate stations per endpoint,
-  ranked by walking distance, letting the agent pick the
-  route-optimal pairing. §5.1 mock-up would need a minor update
-  (plural `Board candidates:` block). Schema change is additive
-  per R9.
-- **Effort**: ~1 hour in `tools/discovery.py` + spec amendment
-  + mock-up update. Low risk, no upstream-API impact.
+The MRT-suggestion pattern (single `Board candidate` / `Alight
+candidate` within 800 m) was replaced wholesale by Phase 5's OneMap
+PT orchestrator. OneMap picks the route-optimal boarding/alighting
+stations itself as part of the returned itinerary — no geographic-
+nearest heuristic in Phase 5 code. Kept in NOTES for traceability
+against the v0.2-phase-4 tag.
 
 ---
 
 ## "47m walk" in find_route MRT block misread as minutes by the agent
 
 *Observed 2026-04-22 during Phase 4 verification (Scenario 3,
-Tuas Link → Changi Airport).*
+Tuas Link → Changi Airport).* **Obsolete after Phase 5.**
 
-`find_route`'s MRT SUGGESTION body uses the project-wide §5.2
-distance convention: `47m walk from origin`, `36m walk to
-destination`. For small values (<100m) the agent rendered these
-as "~47 min walk" / "~36 min" in its narrative — mistaking metres
-for minutes. The values are plausible as either unit in a travel
-context, so the LLM guessed wrong.
-
-- **Fix shape**: in `tools/discovery.py`, emit distances as
-  `47 m walk from origin` (space) or `47 metres walk from origin`
-  within the MRT block only. Conflicts with §5.2's `<n>m` rule, so
-  a spec amendment is warranted. Alternatively, add explicit
-  qualifier: `— 47m (distance) walk from origin`.
-- **Relevance**: agent-readability, not correctness. The tool is
-  emitting the right value; the unit is just ambiguous when
-  context-free.
-- **Effort**: ~10 min code + spec amendment in §5.2 / §5.4.
-  Low risk, output-only change.
+The MRT SUGGESTION block is gone in Phase 5. WALK legs in the new
+envelope carry the distance as `(47 m)` (space before unit, per the
+§5.1 mock-up) inside a column already labelled WALK, and appear
+alongside an explicit `N min` duration in a separate column — so the
+unit ambiguity that tripped up the agent is structurally avoided.
+Kept in NOTES for traceability against the v0.2-phase-4 tag.
 
 ---
 
@@ -182,3 +162,63 @@ knowledge — works, but isn't tool-verified.
   amendment + probe update required.
 - **Effort**: ~2 hours data entry + schema update + probe update.
   Gated on scope decision, not an immediate candidate.
+
+---
+
+## find_route sensitivity to input-coord precision (Phase 5)
+
+*Observed 2026-04-23 during Phase 5 live testing (Singapore Zoo →
+Parc Central Residences, 528516).*
+
+The same natural-language prompt produced itineraries that differed
+by 10+ min depending on how `resolve_location` pinned the endpoints.
+A ~400 m origin shift and ~900 m destination shift between two runs
+produced a 96 min vs. 106 min fastest itinerary and a 12 m vs. 207 m
+final walk — because the "better" coordinates happened to sit within
+an express-bus (969) stop radius that the other coordinates missed.
+
+This is OneMap's PT routing behaving correctly (tight first/last-mile
+coupling to nearby transit stops). The weak link is upstream: postal
+codes resolve to postcode centroids, which can be 100–300 m off the
+actual building entrance.
+
+- **Fix shape A**: agent-side nudge — prefer building-name searches
+  over postal-code searches when both are available. Document in
+  `resolve_location`'s `@mcp.tool()` description.
+- **Fix shape B**: server-side — snap `find_route` input coordinates
+  to the nearest bus stop / MRT node before calling OneMap, up to a
+  capped offset (e.g. 150 m).
+- **Fix shape C**: run OneMap twice (name-resolved + postcode-
+  resolved coords) and union the itineraries, dedup-ing by leg
+  signature.
+- **Effort**: A ≈ 5 min; B ≈ half-day + probe; C ≈ 1–2 hours but
+  doubles the OneMap call budget per `find_route` invocation.
+
+---
+
+## OneMap PT ranks by duration only; no transfer-comfort weighting (Phase 5)
+
+*Observed 2026-04-23 during Phase 5 live testing (Tampines → Pasir
+Ris St 72).*
+
+OneMap returned 3 itineraries where Option 1 was 18 min / 1 transfer
+and Option 2 was 19 min / 0 transfers. OneMap's ranker preferred the
+1-transfer-for-1-min-savings itinerary; the consuming agent correctly
+downgraded it in the narration ("skip the transfer, take the direct
+bus"). This meant the tool's top-ranked itinerary wasn't the one the
+user would pick.
+
+The OneMap PT endpoint exposes a `transferPenalty` query parameter
+(seen at `"2500"` in `scratch/onemap-pt-probe-pair-2.json`'s
+`requestParameters`). Tuning that could nudge OneMap's ranker toward
+the human-comfort choice and remove the narration-layer override.
+
+- **Fix shape**: add `transferPenalty` to the `api/onemap.py
+  route_pt` call with a calibrated default (probe-verified;
+  candidate values 60 / 120 / 180 s). Validate that the new ranking
+  still produces the Sengkang → Outram and Tampines → Far East
+  Flora outcomes unchanged.
+- **Effort**: ~1 hour including calibration against the existing
+  5-pair set.
+- **Relevance**: medium. Avoids a class of agent-narration overrides
+  that otherwise have to be documented as expected behaviour.

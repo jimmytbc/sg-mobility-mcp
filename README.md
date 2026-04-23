@@ -882,18 +882,21 @@ into <https://www.onemap.gov.sg/apidocs/> in a browser to verify.
 Your LTA AccountKey is invalid or still pending approval. Check your email
 for the approval message — LTA issues keys within 1–2 business days.
 
-### The first `find_bus_route` or `search_bus_stops` call is slow
+### The first `search_bus_stops` or `find_route` fallback call is slow
 
 Expected. The server lazy-loads ~5,200 bus stops (and ~26,700 bus route
-rows on first `find_bus_route` call) from LTA on first use, then caches
-them in memory for 24 hours. Subsequent calls are instant.
+rows the first time the bus-only fallback path is triggered) from LTA
+on first use, then caches them in memory for 24 hours. Subsequent
+calls are instant. The primary `find_route` path (OneMap PT) doesn't
+depend on these caches — only the bus-only fallback does.
 
 ### Claude doesn't call my tools
 
 - Check `~/Library/Logs/Claude/mcp-server-sg-mobility-mcp.log` (macOS) for
   startup errors.
 - Verify Claude Desktop sees the server: in a new chat, ask
-  _"What tools do you have from sg-mobility-mcp?"_ — Claude should list all eight.
+  _"What tools do you have from sg-mobility-mcp?"_ — the agent should
+  list all eight.
 - If Claude answers without calling any tool (e.g.
   _"I don't have real-time transport data"_), ask more directly:
   _"Please call the get_train_alerts tool."_
@@ -922,10 +925,11 @@ Small, flat, explicit — no framework, no database, no background workers.
   - `bus_stops` list — warmed lazily on first `search_bus_stops`,
     `get_bus_arrivals`, or `get_location_context` call. Used for
     code → name resolution and proximity search. 24h TTL.
-  - `routes_by_service` / `routes_by_stop` — warmed lazily on first
-    `find_bus_route` call. Indexed two ways so both "what services pass
-    this stop?" and "what's the stop sequence on this route?" are O(1).
-    24h TTL.
+  - `routes_by_service` / `routes_by_stop` — warmed lazily on the
+    first invocation of `find_bus_route_impl` (reachable only via
+    `find_route`'s bus-only fallback path since Phase 5). Indexed two
+    ways so both "what services pass this stop?" and "what's the stop
+    sequence on this route?" are O(1). 24h TTL.
 - **Static MRT/LRT catalog** (`data/mrt_stations.json`): a hand-curated
   JSON array of all 181 operational stations across the 9 rail lines,
   loaded once at server import and held in memory. Enables
@@ -1008,12 +1012,14 @@ sg-mobility-mcp/
 ├── tools/
 │   ├── __init__.py
 │   ├── _format.py         ← shared envelope / error-string helpers
+│   ├── _pt_routing.py     ← OneMap PT response parser + A1-envelope formatter
 │   ├── bus.py             ← search_bus_stops, get_bus_arrivals
 │   ├── train.py           ← get_train_alerts
 │   ├── carpark.py         ← get_carpark_availability
 │   ├── location.py        ← resolve_location, reverse_geocode
-│   ├── routing.py         ← find_bus_route
-│   └── context.py         ← get_location_context (aggregation)
+│   ├── routing.py         ← find_bus_route_impl (internal, fallback path only)
+│   ├── context.py         ← get_location_context (aggregation)
+│   └── discovery.py       ← find_route (OneMap PT orchestrator)
 ├── data/
 │   ├── mrt_stations.json  ← hand-curated MRT/LRT station catalog (loaded at startup)
 │   └── README.md          ← schema, update sources, quarterly-review process
