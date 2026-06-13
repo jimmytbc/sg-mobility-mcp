@@ -96,5 +96,6 @@ register_discovery_tools(mcp, lta, cache, onemap)
 
 
 if __name__ == "__main__":
-    print("sg-mobility-mcp: starting on stdio transport", file=sys.stderr)
-    mcp.run(transport="stdio")
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    print(f"sg-mobility-mcp: starting on {transport} transport", file=sys.stderr)
+    mcp.run(transport=transport)
