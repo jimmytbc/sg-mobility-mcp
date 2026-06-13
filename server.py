@@ -76,7 +76,11 @@ if _missing:
         f"See .env.example and README.md for setup."
     )
 
-mcp = FastMCP("sg-mobility-mcp")
+mcp = FastMCP(
+    "sg-mobility-mcp",
+    host=os.environ.get("FASTMCP_HOST", "127.0.0.1"),
+    port=int(os.environ.get("FASTMCP_PORT", "8000")),
+)
 lta = LTAClient(LTA_ACCOUNT_KEY)  # type: ignore[arg-type]
 onemap = OneMapClient(ONEMAP_EMAIL, ONEMAP_PASSWORD)  # type: ignore[arg-type]
 cache = MobilityCache()
