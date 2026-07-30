@@ -2,7 +2,18 @@ services:
   sg_transport_mcp:
     build: .
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"   # loopback only: close LAN exposure (unauthenticated server)
+    env_file: .env
+    environment:
+      - MCP_TRANSPORT=streamable-http
+      - FASTMCP_HOST=0.0.0.0
+      - FASTMCP_PORT=8001
+    restart: unless-stopped
+
+  sg_transport_mcp_chatgpt:
+    build: .
+    ports:
+      - "127.0.0.1:8011:8001"
     env_file: .env
     environment:
       - MCP_TRANSPORT=streamable-http
