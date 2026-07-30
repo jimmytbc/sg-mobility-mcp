@@ -5,12 +5,17 @@ transport migration (legacy SSE → streamable HTTP in `docker-compose.yml`).
 
 ## Open
 
-### F-1 - SDK pin blocks MCP 2026-07-28
+### F-1 - Native MCP 2026-07-28 requires migration off the removed FastMCP shim
 
-- `requirements.txt` pins `mcp[cli]==1.27.0`, whose protocol ceiling is
-  2025-11-25. Bump deliberately once a 2026-07-28-capable release is vetted
-  (dependency edits need explicit authorisation per §7). First-party code
-  touches minimal SDK surface, so the bump should be near-mechanical.
+- 2026-07-30: bumped `mcp[cli]` 1.27.0 → 1.29.0 (final 1.x) under operator
+  authorisation. Protocol ceiling remains 2025-11-25: `mcp 2.0.0` (the
+  2026-07-28-native release) **removes** `mcp.server.fastmcp`, which
+  `server.py` imports. Native support needs a small code migration - the
+  likeliest target is the 2.x SDK's new high-level
+  `mcp.server.mcpserver.MCPServer` (`@tool` decorator, similar surface);
+  alternative is the standalone `fastmcp` package once its 4.x line
+  (mcp>=2) is stable. Deprecation-clean and safe within the 12-month
+  window meanwhile.
 
 ### F-2 - server.json staleness
 

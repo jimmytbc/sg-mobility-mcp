@@ -1,4 +1,4 @@
-mcp[cli]==1.27.0
+mcp[cli]==1.29.0
 httpx==0.28.1
 pydantic==2.13.2
 python-dotenv==1.2.2
